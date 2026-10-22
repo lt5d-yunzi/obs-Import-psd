@@ -1,0 +1,1 @@
+/Users/yunzi/Desktop/obsplugin/obs-psd/third_party/qt-headers/src/corelib/kernel/qobject_p_p.h

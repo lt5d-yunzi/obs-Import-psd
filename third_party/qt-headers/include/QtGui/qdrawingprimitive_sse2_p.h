@@ -1,0 +1,1 @@
+/Users/yunzi/Desktop/obsplugin/obs-psd/third_party/qt-headers/src/gui/painting/qdrawingprimitive_sse2_p.h

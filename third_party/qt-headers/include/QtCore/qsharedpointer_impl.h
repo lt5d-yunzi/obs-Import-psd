@@ -1,0 +1,1 @@
+/Users/yunzi/Desktop/obsplugin/obs-psd/third_party/qt-headers/src/corelib/tools/qsharedpointer_impl.h

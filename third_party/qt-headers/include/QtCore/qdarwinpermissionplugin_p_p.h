@@ -1,0 +1,1 @@
+/Users/yunzi/Desktop/obsplugin/obs-psd/third_party/qt-headers/src/corelib/platform/darwin/qdarwinpermissionplugin_p_p.h
