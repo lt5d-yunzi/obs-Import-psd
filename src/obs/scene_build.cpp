@@ -230,25 +230,26 @@ Placement compute_placement(const psd::Document &doc, SceneBuildOptions::Placeme
 
 void place_item(obs_sceneitem_t *item, const psd::Layer &layer, const Placement &p)
 {
-	struct obs_transform_info info = {};
-	vec2_set(&info.pos, (float)(p.origin_x + layer.left * p.fit), (float)(p.origin_y + layer.top * p.fit));
-	info.rot = 0.0f;
-	vec2_set(&info.scale, (float)p.fit, (float)p.fit);
-	info.alignment = OBS_ALIGN_LEFT | OBS_ALIGN_TOP;
-	info.bounds_type = OBS_BOUNDS_NONE;
-	info.bounds_alignment = OBS_ALIGN_LEFT | OBS_ALIGN_TOP;
-	vec2_set(&info.bounds, (float)layer.width() * (float)p.fit, (float)layer.height() * (float)p.fit);
-	info.crop_to_bounds = false;
-	obs_sceneitem_set_info2(item, &info);
-	// Belt and braces: some OBS builds ignore pos/scale in set_info2 when the
-	// source texture has not been created yet, so set them again explicitly.
-	vec2 pos;
-	vec2_set(&pos, (float)(p.origin_x + layer.left * p.fit), (float)(p.origin_y + layer.top * p.fit));
-	obs_sceneitem_set_pos(item, &pos);
-	vec2 scale;
-	vec2_set(&scale, (float)p.fit, (float)p.fit);
-	obs_sceneitem_set_scale(item, &scale);
+	// Use OBS' bounds mode: the item is anchored TOP|LEFT at `pos` and forced to
+	// exactly (width, height) document pixels. This is the same representation
+	// the OBS UI produces when a source is scaled to a known size, and unlike
+	// scale it does not depend on the source's texture being loaded yet.
 	obs_sceneitem_set_alignment(item, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
+	obs_sceneitem_set_bounds_alignment(item, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
+	obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_SCALE_INNER);
+
+	struct vec2 pos;
+	vec2_set(&pos, (float)(p.origin_x + double(layer.left) * p.fit),
+		 (float)(p.origin_y + double(layer.top) * p.fit));
+	obs_sceneitem_set_pos(item, &pos);
+
+	struct vec2 bounds;
+	vec2_set(&bounds, (float)(double(layer.width()) * p.fit), (float)(double(layer.height()) * p.fit));
+	obs_sceneitem_set_bounds(item, &bounds);
+
+	struct vec2 scale;
+	vec2_set(&scale, 1.0f, 1.0f);
+	obs_sceneitem_set_scale(item, &scale);
 }
 
 void apply_blending(obs_sceneitem_t *item, const psd::Layer &layer)
@@ -310,75 +311,38 @@ bool is_group(const psd::Layer &l)
 }
 
 // Adds one layer to `parent` (the root scene or a group's inner scene).
-// Text layers and vector shape layers carry no pixel data in a PSD: Photoshop
-// renders them on the fly. Cut the layer's rectangle out of the flattened
-// composite so the user sees the artwork instead of an empty layer.
-bool crop_from_composite(const psd::Document &doc, const psd::Layer &layer, std::vector<uint8_t> &out)
-{
-	if (!doc.has_composite() || layer.empty() || doc.width <= 0 || doc.height <= 0)
-		return false;
-	const int32_t lw = layer.width(), lh = layer.height();
-	out.assign(size_t(lw) * size_t(lh) * 4, 0);
-	bool any = false;
-	for (int32_t y = 0; y < lh; ++y) {
-		const int32_t sy = layer.top + y;
-		if (sy < 0 || sy >= doc.height)
-			continue;
-		for (int32_t x = 0; x < lw; ++x) {
-			const int32_t sx = layer.left + x;
-			if (sx < 0 || sx >= doc.width)
-				continue;
-			const uint8_t *s = &doc.composite[(size_t(sy) * size_t(doc.width) + size_t(sx)) * 4];
-			uint8_t *d = &out[(size_t(y) * size_t(lw) + size_t(x)) * 4];
-			d[0] = s[0];
-			d[1] = s[1];
-			d[2] = s[2];
-			d[3] = s[3];
-			if (s[3] != 0)
-				any = true;
-		}
-	}
-	return any;
-}
 
 // Adds one layer to `parent` (the root scene or a group's inner scene).
-bool add_layer(BuildState &st, obs_scene_t *parent, const psd::Layer &layer, const Placement &p,
-	       const psd::Document *doc)
+bool add_layer(BuildState &st, obs_scene_t *parent, const psd::Layer &layer, const Placement &p)
 {
-	psd::Layer substituted;
-	const psd::Layer *use = &layer;
 	if (layer.empty() || layer.rgba.empty()) {
-		// No channel data: a text or vector-shape layer (Photoshop renders those
-		// on the fly). Fall back to the flattened composite so the artwork is
-		// still visible instead of an empty layer.
-		if (doc && crop_from_composite(*doc, layer, substituted.rgba)) {
-			substituted = layer;
-			crop_from_composite(*doc, layer, substituted.rgba);
-			use = &substituted;
-			blog(LOG_INFO, "[obs-psd] layer '%s' has no pixel data; cropped from the composite",
-			     layer.name.c_str());
-		} else {
-			blog(LOG_INFO, "[obs-psd] layer '%s' has no pixels, skipped", layer.name.c_str());
-			return true;
-		}
+		// Text and vector-shape layers store no pixels in a PSD (Photoshop
+		// renders them on the fly), so there is nothing to import for them.
+		// The flattened composite cannot be used as a substitute: it contains
+		// every layer stacked together, not this layer alone.
+		blog(LOG_INFO,
+		     "[obs-psd] layer '%s' has no pixel data (text/shape layer); rasterise it in "
+		     "Photoshop (Layer > Rasterize All Layers) before saving to import it",
+		     layer.name.c_str());
+		return true;
 	}
-	if (use->clipped)
+	if (layer.clipped)
 		blog(LOG_WARNING, "[obs-psd] layer '%s' uses a clipping mask; imported as a plain layer",
-		     use->name.c_str());
+		     layer.name.c_str());
 
-	obs_source_t *src = create_layer_source(st, *use);
+	obs_source_t *src = create_layer_source(st, layer);
 	if (!src)
 		return false;
 
 	obs_sceneitem_t *item = obs_scene_add(parent, src);
 	if (!item) {
-		st.err = "obs_scene_add failed for layer '" + use->name + "'";
+		st.err = "obs_scene_add failed for layer '" + layer.name + "'";
 		return false;
 	}
 
-	place_item(item, *use, p);
-	apply_blending(item, *use);
-	obs_sceneitem_set_visible(item, use->visible);
+	place_item(item, layer, p);
+	apply_blending(item, layer);
+	obs_sceneitem_set_visible(item, layer.visible);
 	return true;
 }
 
@@ -412,16 +376,29 @@ bool add_group(BuildState &st, obs_scene_t *parent, const psd::Document &doc, si
 			any_visible = any_visible || sub_visible;
 			i = sub_end;
 		} else {
-			if (!add_layer(st, inner, doc.layers[i], p, &doc))
+			if (!add_layer(st, inner, doc.layers[i], p))
 				return false;
 			any_visible = any_visible || (doc.layers[i].visible && !doc.layers[i].empty());
 			++i;
 		}
 	}
 
+	// OBS group scenes have their own coordinate system anchored at the group
+	// item's position. Members are placed with DOCUMENT coordinates, so the
+	// group item must sit at the placement origin with unit scale; otherwise the
+	// group's own offset would be applied on top of every member position.
+	{
+		obs_sceneitem_set_alignment(group_item, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
+		obs_sceneitem_set_bounds_type(group_item, OBS_BOUNDS_NONE);
+		struct vec2 gpos;
+		vec2_set(&gpos, (float)p.origin_x, (float)p.origin_y);
+		obs_sceneitem_set_pos(group_item, &gpos);
+		struct vec2 gscale;
+		vec2_set(&gscale, (float)p.fit, (float)p.fit);
+		obs_sceneitem_set_scale(group_item, &gscale);
+	}
 	// Group items have no opacity of their own in OBS (members already carry the
-	// baked opacity), and the group's PSD rectangle is only a Photoshop transform
-	// hint: OBS groups are pure containers placed like any other item.
+	// baked opacity); the group rectangle is only a Photoshop metadata hint.
 	obs_sceneitem_set_visible(group_item, any_visible);
 	if (any_visible_out)
 		*any_visible_out = any_visible;
@@ -497,7 +474,7 @@ bool build_scene_from_psd(const psd::Document &doc, const char *scene_name, std:
 			}
 			i = end;
 		} else {
-			if (!add_layer(st, scene, doc.layers[i], p, &doc)) {
+			if (!add_layer(st, scene, doc.layers[i], p)) {
 				ok = false;
 				break;
 			}
