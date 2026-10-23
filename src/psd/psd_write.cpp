@@ -554,7 +554,8 @@ bool serialize_to(detail::ByteBuf &out, const Document &doc, std::string &error)
     std::vector<uint8_t> plane(size_t(W) * size_t(H));
     // PSD stores ONE compression tag, then the row-count table of every plane,
     // then the packed rows of every plane.
-    std::vector<std::vector<std::vector<uint8_t>>> comp_planes(3);
+    const size_t comp_plane_count = 4; // R, G, B, A (matches the header's 4)
+    std::vector<std::vector<std::vector<uint8_t>>> comp_planes(comp_plane_count);
     for (size_t c = 0; c < 3; ++c) {
         for (size_t i = 0; i < plane.size(); ++i) {
             // The flattened preview has no alpha plane, so colour is stored as-is
@@ -566,10 +567,16 @@ bool serialize_to(detail::ByteBuf &out, const Document &doc, std::string &error)
             return false;
         }
     }
-    for (size_t c = 0; c < 3; ++c)
+    for (size_t i = 0; i < plane.size(); ++i)
+        plane[i] = uint8_t(255); // opaque alpha plane
+    if (!encode_plane_rows(plane, W, H, comp_planes[3], error)) {
+        error = "composite row too long for PSD";
+        return false;
+    }
+    for (size_t c = 0; c < comp_plane_count; ++c)
         for (const std::vector<uint8_t> &row : comp_planes[c])
             w.u16(uint16_t(row.size()));
-    for (size_t c = 0; c < 3; ++c)
+    for (size_t c = 0; c < comp_plane_count; ++c)
         for (const std::vector<uint8_t> &row : comp_planes[c])
             w.bytes(row.data(), row.size());
 

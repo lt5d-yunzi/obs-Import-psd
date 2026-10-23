@@ -253,10 +253,11 @@ def parse(path):
     planes = []
     h = res["height"]
     w = res["width"]
-    all_counts = [r.u16() for _ in range(h * 3)]
+    nplanes = res["channels"]  # one composite plane per header channel
+    all_counts = [r.u16() for _ in range(h * nplanes)]
     packed = r.raw(sum(all_counts))
     off = 0
-    for c in range(3):
+    for c in range(nplanes):
         counts = all_counts[c * h:(c + 1) * h]
         plane = bytearray()
         for c2 in counts:

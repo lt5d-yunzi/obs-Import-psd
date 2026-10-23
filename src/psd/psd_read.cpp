@@ -900,7 +900,11 @@ bool read_composite(const uint8_t *data, size_t size, size_t start, int64_t w, i
         err = "truncated composite data";
         return false;
     }
-    const int maxc = std::max(std::max(ri, gi), std::max(bi, ai)) + 1;
+    // The composite stores one plane per channel declared in the file header
+    // (Photoshop writes 4 planes for RGB documents: R, G, B, A), so the plane
+    // count must come from the header, not from the colour-channel mapping.
+    const int color_planes = std::max(std::max(ri, gi), std::max(bi, ai)) + 1;
+    const int maxc = (channels >= color_planes && channels <= 56) ? channels : color_planes;
     if (compression == 2 || compression == 3) {
         // ZIP composite: one deflate stream holding all colour planes, each
         // plane w*h bytes, in channel order.
@@ -1157,7 +1161,9 @@ bool parse_document(const uint8_t *data, size_t size, Document &out, std::string
         } else if (layout_end >= size) {
             composite_error = "no composite image data";
         } else {
-            const int comp_channels = std::max(std::max(ri, gi), std::max(bi, ai)) + 1;
+            // Pass the header channel count: the composite holds one plane per
+            // header channel (Photoshop writes 4 planes for an RGB document).
+            const int comp_channels = int(nchan);
             if (!read_composite(data, size, layout_end, W, H, comp_channels, ri, gi, bi, ai, opts.max_pixels,
                                 out.composite, composite_error))
                 out.composite.clear();

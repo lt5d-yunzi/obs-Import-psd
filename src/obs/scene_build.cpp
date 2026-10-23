@@ -240,6 +240,15 @@ void place_item(obs_sceneitem_t *item, const psd::Layer &layer, const Placement 
 	vec2_set(&info.bounds, (float)layer.width() * (float)p.fit, (float)layer.height() * (float)p.fit);
 	info.crop_to_bounds = false;
 	obs_sceneitem_set_info2(item, &info);
+	// Belt and braces: some OBS builds ignore pos/scale in set_info2 when the
+	// source texture has not been created yet, so set them again explicitly.
+	vec2 pos;
+	vec2_set(&pos, (float)(p.origin_x + layer.left * p.fit), (float)(p.origin_y + layer.top * p.fit));
+	obs_sceneitem_set_pos(item, &pos);
+	vec2 scale;
+	vec2_set(&scale, (float)p.fit, (float)p.fit);
+	obs_sceneitem_set_scale(item, &scale);
+	obs_sceneitem_set_alignment(item, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
 }
 
 void apply_blending(obs_sceneitem_t *item, const psd::Layer &layer)
