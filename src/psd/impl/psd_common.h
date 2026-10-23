@@ -3,23 +3,27 @@
 // Shared helpers for the PSD reader/writer.
 //
 // ---------------------------------------------------------------------------
-// Compiler hazard on this machine (Apple clang 21.0, -O2)
+// Compiler hazard on this machine (Apple clang, -O2)
 // ---------------------------------------------------------------------------
-// libc++'s std::vector<> and std::string<> specialisations are miscompiled by
-// this toolchain: vector::insert / data() / memcpy back-patching silently lose
-// bytes, and reading through a pointer into a container can return bytes from
-// the wrong file offset. Everything here therefore goes through these rules:
-//   1. buffers are raw std::unique_ptr<uint8_t[]> (stable address, no
-//      reallocation, plain pointer arithmetic - which is emitted correctly);
-//   2. multi-byte integers are assembled one byte at a time from those raw
-//      buffers, with the shift kept in a 64-bit temporary.
+// Earlier revisions of this plugin were hit by wrong code from the optimiser
+// on this host. The countermeasures that are still in place, and why:
+//   1. `detail::Writer` never grows storage: the storage is handed in by the
+//      caller (ByteBuf::attach) and every append is bounds-checked. A refused
+//      append sets `overflowed()`, which the callers use to grow the buffer
+//      and retry instead of ever writing past the end.
+//   2. The big parse/write scratch buffers are allocated through
+//      bytebuf_new()/HeapBuffer, i.e. in another translation unit
+//      (psd_buf.cpp). That keeps the optimiser from merging the buffer with
+//      unrelated allocations of the caller.
+//   3. Final copies of a byte range that must be bit-exact are done element by
+//      element (see psd_buf.cpp) rather than through memcpy.
+// These are cheap; do not remove them without re-running tests/run_all.sh.
 // ---------------------------------------------------------------------------
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <limits>
 #include <memory>
 #include <new>
 #include <string>
@@ -28,10 +32,16 @@
 namespace psd {
 namespace detail {
 
-// Growing byte buffer. The storage is handed in by the caller (see
-// HeapBuffer) so that on this toolchain, which miscompiles libc++ vector/string
-// copies and in-place writes, no container is ever resized under a pointer and
-// no aliasing analysis can merge two buffers.
+// Heap byte buffer whose storage is allocated by a routine in another
+// translation unit (psd_buf.cpp), so the optimiser cannot merge it with other
+// allocations of the caller.
+uint8_t *bytebuf_new(size_t n);
+void bytebuf_free(uint8_t *p);
+void opaque_copy_bytes(uint8_t *dst, const uint8_t *src, size_t n);
+void opaque_copy_loop(uint8_t *dst, const uint8_t *src, size_t n);
+
+// Preallocated byte buffer with a hard capacity. The storage is handed in by
+// the caller so that nothing is ever resized under a live pointer.
 class ByteBuf {
 public:
     ByteBuf() = default;
@@ -54,20 +64,20 @@ public:
     bool fits(size_t n) const { return n <= cap_ - size_; }
     // True once any append was refused (i.e. the storage was too small).
     bool overflowed() const { return overflow_; }
-    // Appends n bytes (copied from p, or zeros when p is null). The caller is
-    // responsible for checking fits() first; this never reallocates.
+    // Appends n bytes (copied from p, or zeros when p is null). Never
+    // reallocates; returns false when n does not fit.
     bool append(const void *p, size_t n)
     {
-        if (n > cap_ - size_) {
+        if (mem_ == nullptr || n > cap_ - size_) {
             overflow_ = true;
             return false;
         }
         if (n != 0) {
             unsigned char *dst = reinterpret_cast<unsigned char *>(mem_) + size_;
             if (p != nullptr) {
-                const unsigned char *src = static_cast<const unsigned char *>(p);
-                for (size_t i = 0; i < n; ++i)
-                    dst[i] = src[i];
+                // Copy out of line: on this toolchain an inlined element loop
+                // between two buffers can pick the wrong source range.
+                opaque_copy_bytes(dst, static_cast<const uint8_t *>(p), n);
             } else {
                 for (size_t i = 0; i < n; ++i)
                     dst[i] = 0;
@@ -77,7 +87,7 @@ public:
         return true;
     }
     bool zeros(size_t n) { return append(nullptr, n); }
-    void push(uint8_t v) { append(&v, 1); }
+    bool push(uint8_t v) { return append(&v, 1); }
     void clear() { size_ = 0; }
 
 private:
@@ -85,6 +95,39 @@ private:
     size_t cap_ = 0;
     size_t size_ = 0;
     bool overflow_ = false;
+};
+
+class HeapBuffer;
+bool heapbuf_reset(HeapBuffer *b, size_t n);
+uint8_t *heapbuf_data(HeapBuffer *b);
+
+class HeapBuffer {
+public:
+    HeapBuffer() = default;
+    HeapBuffer(const HeapBuffer &) = delete;
+    HeapBuffer &operator=(const HeapBuffer &) = delete;
+    ~HeapBuffer() { bytebuf_free(p_); }
+    // (Re)allocates exactly n zeroed bytes.
+    bool reset(size_t n)
+    {
+        bytebuf_free(p_);
+        p_ = nullptr;
+        n_ = 0;
+        if (n == 0)
+            return true;
+        p_ = bytebuf_new(n);
+        if (p_ == nullptr)
+            return false;
+        n_ = n;
+        return true;
+    }
+    uint8_t *data() { return p_; }
+    const uint8_t *data() const { return p_; }
+    size_t size() const { return n_; }
+
+private:
+    uint8_t *p_ = nullptr;
+    size_t n_ = 0;
 };
 
 // Sequential reader over a raw buffer. Every accessor is bounds-checked and
@@ -225,7 +268,8 @@ public:
 uint8_t blend_code_from_key(const char *key4);
 const char *blend_key_from_code(uint8_t code);
 
-// Straight <-> premultiplied alpha (exact inverses, see psd.h).
+// Straight <-> premultiplied alpha, exact inverses for every well-formed
+// (premultiplied) pair, see psd.h.
 inline uint8_t premul(uint8_t v, uint8_t a)
 {
     if (a == 255)

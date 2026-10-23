@@ -23,7 +23,7 @@ CXX_FLAGS=(
   -I"$HERE/third_party/qt-headers/src/gui"
   -I"$HERE/third_party/qt-headers/src/widgets"
   -F"$FW"
-  -Wall -Wextra -Wno-unused-parameter -Wno-vexing-parse
+  -Wall -Wextra -Wno-unused-parameter -Wno-vexing-parse -Wno-missing-braces
 )
 
 SOURCES=(
@@ -31,6 +31,7 @@ SOURCES=(
   src/ui/psd_ui.cpp
   src/psd/psd_read.cpp
   src/psd/psd_write.cpp
+  src/psd/psd_buf.cpp
   src/psd/rle.cpp
   src/obs/source_render.cpp
   src/obs/scene_build.cpp

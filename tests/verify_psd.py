@@ -103,7 +103,7 @@ def parse_luni(payload):
 
 
 def parse(path):
-    data = open(path, "rb").read()
+    data = path if isinstance(path, (bytes, bytearray)) else open(path, "rb").read()
     res = {"path": path, "size": len(data)}
     r = Reader(data)
     sig = r.raw(4)
@@ -131,9 +131,15 @@ def parse(path):
     lam_end = r.pos + lam_len
     li_len = r.u32()
     li_end = r.pos + li_len
+    if lam_end > len(data):
+        raise ParseError("layer&mask section past end of file")
     if li_end > lam_end:
         raise ParseError("layer info runs past layer&mask section")
-    count = r.i32()
+    # PSD stores the layer count as a SIGNED 16-BIT value (negative means the
+    # first alpha channel is merged); the record list follows immediately.
+    # int16 record count; a negative value only means "first alpha channel is
+    # merged". The records start immediately after these two bytes.
+    count = r.i16()
     res["layer_count"] = count
     records = []
     for idx in range(abs(count)):
@@ -146,7 +152,7 @@ def parse(path):
         for _ in range(nch):
             cid = r.i16()
             clen = r.u32()
-            chans.append((cid, clen, r.pos))
+            chans.append((cid, clen))
         blend_sig = r.raw(4)
         blend_key = r.raw(4).decode("latin-1")
         opacity = r.u8()
@@ -155,6 +161,7 @@ def parse(path):
         filler = r.u8()
         extra_len = r.u32()
         extra_end = r.pos + extra_len
+        chans_off = extra_end  # channel bodies start after the extra data
         mask_len = r.u32()
         r.raw(mask_len)
         br_len = r.u32()
@@ -189,8 +196,15 @@ def parse(path):
             "lsct": lsct,
             "channel_data": [],
         }
-        for (cid, clen, at) in chans:
-            body = data[at:at + clen]
+        # `chans` holds (id, declared_length, absolute_offset) where the offset
+        # points at the channel's own 2-byte compression tag (PSD declares the
+        # length of everything from that tag onwards). The channel bodies are
+        # contiguous, so `at` for the next channel is simply at + clen.
+        # Channel bodies are contiguous and start right after the record's
+        # extra data. `chans_off` is the absolute start of the first body.
+        body_at = chans_off
+        for (cid, clen) in chans:
+            body = data[body_at:body_at + clen]
             if len(body) != clen:
                 raise ParseError("channel data truncated in record %d" % idx)
             comp = struct.unpack_from(">H", body, 0)[0]
@@ -199,11 +213,10 @@ def parse(path):
             if comp != 1:
                 raise ParseError("channel compression %d in record %d" % (comp, idx))
             if len(body) < 2 + 2 * h:
-                raise ParseError("channel row counts truncated")
+                raise ParseError("channel row counts truncated in record %d" % idx)
             counts = struct.unpack_from(">%dH" % h, body, 2)
             packed = body[2 + 2 * h:]
-            total = sum(counts)
-            if len(packed) < total:
+            if len(packed) < sum(counts):
                 raise ParseError("channel RLE rows truncated in record %d" % idx)
             plane = bytearray()
             off = 0
@@ -213,17 +226,21 @@ def parse(path):
             if len(plane) != w * h:
                 raise ParseError("channel size mismatch in record %d" % idx)
             rec["channel_data"].append((cid, bytes(plane)))
-            r.pos = at + clen
+            body_at += clen
+        r.pos = body_at
         records.append(rec)
     res["records"] = records
     if r.pos != li_end:
         raise ParseError("layer info length mismatch (at %d, end %d)" % (r.pos, li_end))
-    # global layer mask info must fit
-    glm = r.i16()
-    r.raw(glm)
+    # global layer mask info (only present when the section has room for it)
+    if li_end + 2 <= lam_end:
+        glm = struct.unpack_from(">H", data, li_end)[0]
+        if li_end + 2 + glm > lam_end:
+            raise ParseError("global layer mask does not fit the section")
     r.pos = lam_end
 
     # --- composite ---------------------------------------------------------
+    r.pos = lam_end
     comp = r.u16()
     if comp != 1:
         raise ParseError("composite compression is %d, expected RLE" % comp)

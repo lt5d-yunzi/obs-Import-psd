@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <limits>
 
 namespace psd {
@@ -26,27 +27,83 @@ namespace {
 constexpr int32_t kMaxDim = 30000;     // Photoshop's PSD (not PSB) limit
 constexpr size_t kMaxRecords = 0x7FFF; // signed 16-bit layer count
 constexpr size_t kMaxPascal = 255;
+constexpr size_t kStreamCapacity = size_t(1) << 32;  // layer-info stream scratch buffer
 
 // Section divider types as stored in the lsct block.
-constexpr uint32_t kDivOther = 0;
 constexpr uint32_t kDivOpen = 1;   // "</" show-all, above the group contents
 constexpr uint32_t kDivClosed = 2; // "<"  hide-all, below the group contents
 
 // One entry of the flat record list that ends up in the layer-info section.
 struct Record {
-    const Layer *layer = nullptr; // null for divider records
-    bool is_divider = false;
-    uint32_t divider = kDivOther;
-    std::string name;             // divider name (PSD section name)
+    const Layer *layer = nullptr;       // null for divider records
+    bool is_divider = false;            // convenience flag (divider != 0)
+    uint32_t divider = 0;               // lsct type for divider records
+    int32_t l = 0, t = 0, r = 0, b = 0; // bounds of a divider record
+    std::string name;                   // divider name (PSD section name)
 };
+
+// Bounds a group's divider records carry (see the header comment).
+struct DividerBounds {
+    int32_t l = 0, t = 0, r = 0, b = 0;
+};
+
+// A group placeholder (psd.h "Groups").
+bool is_group(const Layer &L) { return L.blend_key == "group"; }
+
+
+
+// Divider bounds of every group (in `layers` order): the union of the pixel
+// bounds of the layers inside it, clamped to the document; all-zero when the
+// group has no pixels. Groups are delimited exactly like composite_layers().
+std::vector<DividerBounds> group_bounds(const Document &doc)
+{
+    std::vector<DividerBounds> bounds;
+    for (size_t i = 0; i < doc.layers.size(); ++i) {
+        if (!is_group(doc.layers[i]))
+            continue;
+        int64_t l = 0, t = 0, r = 0, b = 0;
+        bool any = false;
+        for (size_t j = i + 1; j < doc.layers.size() && !is_group(doc.layers[j]); ++j) {
+            const Layer &L = doc.layers[j];
+            if (L.empty())
+                continue;
+            if (!any) {
+                l = L.left;
+                t = L.top;
+                r = L.right;
+                b = L.bottom;
+                any = true;
+            } else {
+                l = std::min<int64_t>(l, L.left);
+                t = std::min<int64_t>(t, L.top);
+                r = std::max<int64_t>(r, L.right);
+                b = std::max<int64_t>(b, L.bottom);
+            }
+        }
+        DividerBounds d;
+        if (any) {
+            const int64_t W = doc.width, H = doc.height;
+            l = std::min<int64_t>(std::max<int64_t>(l, 0), W);
+            t = std::min<int64_t>(std::max<int64_t>(t, 0), H);
+            r = std::min<int64_t>(std::max<int64_t>(r, 0), W);
+            b = std::min<int64_t>(std::max<int64_t>(b, 0), H);
+            if (r < l || b < t)
+                l = t = r = b = 0;
+            d.l = int32_t(l);
+            d.t = int32_t(t);
+            d.r = int32_t(r);
+            d.b = int32_t(b);
+        }
+        bounds.push_back(d);
+    }
+    return bounds;
+}
 
 bool valid_layer_bounds(const Layer &L)
 {
     return L.left >= -kMaxDim && L.top >= -kMaxDim && L.right <= kMaxDim && L.bottom <= kMaxDim &&
            L.left <= L.right && L.top <= L.bottom;
 }
-
-bool is_group(const Layer &L) { return L.blend_key == "group"; }
 
 // RLE-encodes one plane row by row; each row must fit the 16-bit count field.
 bool encode_plane_rows(const std::vector<uint8_t> &plane, int32_t w, int32_t h,
@@ -63,6 +120,26 @@ bool encode_plane_rows(const std::vector<uint8_t> &plane, int32_t w, int32_t h,
     return true;
 }
 
+// Byte length of one encoded channel as declared in the record: compression
+// tag (2) + h row counts (2 each) + the packed rows.
+uint64_t channel_length(const std::vector<std::vector<uint8_t>> &rows)
+{
+    uint64_t n = 2u + uint64_t(rows.size()) * 2u;
+    for (const std::vector<uint8_t> &row : rows)
+        n += row.size();
+    return n;
+}
+
+// Appends one channel body in RLE form (compression tag, row counts, rows).
+void append_channel(detail::Writer &w, const std::vector<std::vector<uint8_t>> &rows)
+{
+    w.u16(1); // RLE
+    for (const std::vector<uint8_t> &row : rows)
+        w.u16(uint16_t(row.size()));
+    for (const std::vector<uint8_t> &row : rows)
+        w.bytes(row.data(), row.size());
+}
+
 uint8_t to_psd_opacity(float f)
 {
     if (!(f > 0.0f))
@@ -74,19 +151,6 @@ uint8_t to_psd_opacity(float f)
 
 // Splits straight RGBA8 into PSD planes ordered alpha, R, G, B (ids -1,0,1,2)
 // with the colour premultiplied against white, as PSD stores it.
-void split_premul(const uint8_t *rgba, int32_t w, int32_t h, std::vector<std::vector<uint8_t>> &out)
-{
-    const size_t n = size_t(w) * size_t(h);
-    out.assign(4, std::vector<uint8_t>(n, 0));
-    std::vector<uint8_t> &A = out[0], &R = out[1], &G = out[2], &B = out[3];
-    for (size_t i = 0; i < n; ++i) {
-        const uint8_t a = rgba[i * 4 + 3];
-        A[i] = a;
-        R[i] = detail::premul(rgba[i * 4 + 0], a);
-        G[i] = detail::premul(rgba[i * 4 + 1], a);
-        B[i] = detail::premul(rgba[i * 4 + 2], a);
-    }
-}
 
 // Writes an "8BIM key len data<pad>" block (data padded to 4 bytes).
 bool write_block(detail::Writer &w, const char *key, const std::vector<uint8_t> &payload)
@@ -164,6 +228,16 @@ void write_common_record(detail::Writer &w, int32_t top, int32_t left, int32_t b
     w.end_len(extra_len_at);
 }
 
+// Emits one layer record header (see write_common_record).
+void write_record_header(detail::Writer &w, int32_t top, int32_t left, int32_t bottom, int32_t right,
+                         const std::vector<int16_t> &chan_ids, const std::vector<uint32_t> &chan_lengths,
+                         const char *blend_key4, uint8_t opacity, bool clipped, bool visible, const std::string &name,
+                         const char *block_key, const std::vector<uint8_t> &block_payload)
+{
+    write_common_record(w, top, left, bottom, right, chan_ids, chan_lengths, blend_key4, opacity, clipped, visible,
+                        name, block_key, block_payload);
+}
+
 std::vector<uint8_t> name_payload(const std::string &name)
 {
     std::vector<uint16_t> units;
@@ -188,17 +262,15 @@ std::vector<uint8_t> name_payload(const std::string &name)
     return payload;
 }
 
-// Flattens the record list (bottom-most first) into straight RGBA8.
-void flatten(const std::vector<Record> &records, int32_t W, int32_t H, std::vector<uint8_t> &out)
+// Flattens `layers` (bottom-most first) into straight RGBA8, document-sized.
+void flatten(const std::vector<const Layer *> &layers, int32_t W, int32_t H, std::vector<uint8_t> &out)
 {
     out.assign(size_t(W) * size_t(H) * 4, 0);
     if (out.empty())
         return;
     uint8_t *dst = out.data();
-    for (const Record &rec : records) {
-        if (rec.is_divider || rec.layer == nullptr)
-            continue;
-        const Layer &L = *rec.layer;
+    for (const Layer *Lp : layers) {
+        const Layer &L = *Lp;
         if (!L.visible || L.rgba.empty())
             continue;
         const float op = std::clamp(L.opacity, 0.0f, 100.0f) / 100.0f;
@@ -227,8 +299,19 @@ void flatten(const std::vector<Record> &records, int32_t W, int32_t H, std::vect
                     continue;
                 }
                 for (int c = 0; c < 3; ++c) {
-                    const float v = (float(s[c]) * sa + float(d[c]) * da * (1.0f - sa)) / oa;
-                    d[c] = uint8_t(v + 0.5f);
+                    // Opaque output in exact integer arithmetic. The source is
+                    // straight; the destination stays OPAQUE (d[3] == 255) after
+                    // the first hit, so this is only the weighted colour sum:
+                    //   out = (s*a + d*(255-a)) / 255 , rounded half up.
+                    // Multiplying both terms by 255 gives an exact integer
+                    //   out = (s*a*255 + d*(255-a)*255) / (255*255)
+                    // which is evaluated with 64-bit intermediates.
+                    const uint32_t a = uint32_t(s[3]);
+                    const uint32_t sv = uint32_t(s[c]);
+                    // S = round(s*a/255), D = d (opaque), out = round((S*255 + D*(255-a))/255).
+                    const uint64_t S = (uint64_t(sv) * a * 2u + 255u) / 510u;
+                    const uint64_t num = S * 255u + uint64_t(d[c]) * (255u - a);
+                    d[c] = uint8_t((num * 2u + 255u) / 510u);
                 }
                 d[3] = uint8_t(oa * 255.0f + 0.5f);
             }
@@ -238,21 +321,6 @@ void flatten(const std::vector<Record> &records, int32_t W, int32_t H, std::vect
 
 // Writes one RLE composite plane: per-row byte counts first, then the rows.
 // NOTE: the 2-byte compression tag is written once by the caller, not here.
-void append_composite_plane(detail::Writer &w, const std::vector<uint8_t> &plane, int32_t W, int32_t H)
-{
-    if (W <= 0 || H <= 0 || plane.empty())
-        return;
-    std::vector<std::vector<uint8_t>> rows(static_cast<size_t>(H));
-    for (int32_t y = 0; y < H; ++y) {
-        rows[size_t(y)] = rle_encode(plane.data() + size_t(y) * size_t(W), size_t(W));
-        if (rows[size_t(y)].size() > 0xFFFFu)
-            rows[size_t(y)].resize(0xFFFFu);
-    }
-    for (int32_t y = 0; y < H; ++y)
-        w.u16(uint16_t(rows[size_t(y)].size()));
-    for (int32_t y = 0; y < H; ++y)
-        w.bytes(rows[size_t(y)].data(), rows[size_t(y)].size());
-}
 
 } // namespace
 
@@ -265,7 +333,7 @@ bool serialize_to(detail::ByteBuf &out, const Document &doc, std::string &error)
     }
     const int32_t W = doc.width, H = doc.height;
 
-    // --- validate layers ---------------------------------------------------
+    // --- validate ---------------------------------------------------------
     for (size_t i = 0; i < doc.layers.size(); ++i) {
         const Layer &L = doc.layers[i];
         if (!valid_layer_bounds(L)) {
@@ -285,9 +353,11 @@ bool serialize_to(detail::ByteBuf &out, const Document &doc, std::string &error)
         }
     }
 
-    // --- record list (bottom-most first), see the contract in psd.h --------
+    // --- record list (bottom-most first), see the header comment -----------
+    const std::vector<DividerBounds> gb = group_bounds(doc);
     std::vector<Record> records;
     records.reserve(doc.layers.size() + 8);
+    size_t group_index = 0;
     for (size_t i = 0; i < doc.layers.size();) {
         const Layer &L = doc.layers[i];
         if (!is_group(L)) {
@@ -300,33 +370,28 @@ bool serialize_to(detail::ByteBuf &out, const Document &doc, std::string &error)
         size_t j = i + 1;
         while (j < doc.layers.size() && !is_group(doc.layers[j]))
             ++j;
-        const bool has_content = j > i + 1;
-        {
-            Record close;
-            close.is_divider = true;
-            close.divider = kDivClosed;
-            close.name = L.name;
-            records.push_back(std::move(close));
-        }
+        const DividerBounds &d = gb[group_index++];
+        Record close; // "<" below the content
+        close.divider = kDivClosed;
+        close.name = L.name;
+        close.l = d.l;
+        close.t = d.t;
+        close.r = d.r;
+        close.b = d.b;
+        records.push_back(std::move(close));
         for (size_t k = i + 1; k < j; ++k) {
             Record r;
             r.layer = &doc.layers[k];
             records.push_back(std::move(r));
         }
-        if (has_content) {
-            Record close;
-            close.is_divider = true;
-            close.divider = kDivClosed;
-            close.name = L.name;
-            records.push_back(std::move(close));
-        }
-        {
-            Record open;
-            open.is_divider = true;
-            open.divider = kDivOpen;
-            open.name = L.name;
-            records.push_back(std::move(open));
-        }
+        Record open; // "</" above the content
+        open.divider = kDivOpen;
+        open.name = L.name;
+        open.l = d.l;
+        open.t = d.t;
+        open.r = d.r;
+        open.b = d.b;
+        records.push_back(std::move(open));
         i = j;
     }
     if (records.size() > kMaxRecords) {
@@ -334,64 +399,69 @@ bool serialize_to(detail::ByteBuf &out, const Document &doc, std::string &error)
         return false;
     }
 
-    // --- flat composite (computed first so a failure leaves no file) -------
+    // --- flat composite (computed first so invalid input fails early) ------
     std::vector<uint8_t> flat;
-    flatten(records, W, H, flat);
-    std::vector<std::vector<uint8_t>> flat_planes;
-    split_premul(flat.data(), W, H, flat_planes);
-
-    // --- serialise ---------------------------------------------------------
-    // The builder writes into caller-provided storage; once it overflows every
-    // further write is a no-op and the whole serialisation is reported as a
-    // failure (never a silently truncated file).
-    detail::Writer w;
-    w.buf.attach(out.data(), out.capacity());
-    w.str4("8BPS");
-    w.u16(1);   // version
-    w.zeros(6); // reserved
-    w.u16(4);   // channels
-    w.u32(uint32_t(H));
-    w.u32(uint32_t(W));
-    w.u16(8); // depth
-    w.u16(3); // RGB
-    w.u32(0); // colour mode data length
-
-    // Image resources: just the layer selection id.
     {
-        const size_t at = w.begin_len();
-        std::vector<uint8_t> lnsr(4, 0); // no layer selected
-        write_block(w, "lnsr", lnsr);
-        w.end_len(at);
+        // The flattened preview shows everything the document shows, including
+        // the pixels inside groups (groups are ordering/structure only).
+        std::vector<const Layer *> all_visible;
+        all_visible.reserve(doc.layers.size());
+        for (const Layer &L : doc.layers) {
+            if (is_group(L) || !L.visible || L.empty())
+                continue;
+            all_visible.push_back(&L);
+        }
+        flatten(all_visible, W, H, flat);
     }
 
-    const size_t lam_at = w.begin_len();
-    const size_t li_at = w.begin_len();
-    w.i16(int16_t(-int32_t(records.size()))); // Photoshop convention: negative
+    // --- layer-info stream ------------------------------------------------
+    // The record stream is serialised into its own buffer first, with its
+    // length patched once complete, and then appended as a single block. Each
+    // record gets one contiguous append (see the header comment of this file).
+    detail::HeapBuffer li_mem;
+    if (!li_mem.reset(kStreamCapacity)) {
+        error = "out of memory";
+        return false;
+    }
+    detail::Writer lw;
+    lw.buf.attach(li_mem.data(), li_mem.size());
+    lw.u16(uint16_t(records.size())); // negative convention: see below
+    std::vector<std::vector<uint8_t>> rows;
     for (size_t ri = 0; ri < records.size(); ++ri) {
         const Record &rec = records[ri];
-        if (rec.is_divider) {
+        if (rec.divider != 0) {
             const std::vector<uint8_t> payload = divider_payload(rec.divider);
-            write_common_record(w, 0, 0, 0, 0, {}, {}, "norm", 0, false, false, rec.name, "lsct", payload);
+            // Only "</" carries the group's visibility; "<" is always hidden
+            // (that is how Photoshop stores a closed section divider).
+            const bool visible = rec.divider == kDivOpen;
+            write_record_header(lw, rec.t, rec.l, rec.b, rec.r, {}, {}, "norm", 0, false, visible, rec.name, "lsct",
+                                payload);
             continue;
         }
         const Layer &L = *rec.layer;
         const bool has_pixels = !L.empty();
-        std::vector<std::vector<uint8_t>> planes;
-        std::vector<std::vector<uint8_t>> rows;
-        std::vector<uint32_t> chan_lengths;
         std::vector<int16_t> chan_ids;
+        std::vector<uint32_t> chan_lengths;
+        // Straight -> premultiplied planes, ordered alpha, R, G, B.
+        std::vector<std::vector<uint8_t>> planes;
         if (has_pixels) {
-            split_premul(L.rgba.data(), L.width(), L.height(), planes);
+            const size_t n = size_t(L.width()) * size_t(L.height());
+            planes.assign(4, std::vector<uint8_t>(n, 0));
+            for (size_t i = 0; i < n; ++i) {
+                const uint8_t a = L.rgba[i * 4 + 3];
+                planes[0][i] = a;
+                planes[1][i] = detail::premul(L.rgba[i * 4 + 0], a);
+                planes[2][i] = detail::premul(L.rgba[i * 4 + 1], a);
+                planes[3][i] = detail::premul(L.rgba[i * 4 + 2], a);
+            }
             chan_ids.assign({-1, 0, 1, 2});
             chan_lengths.resize(4);
             for (size_t c = 0; c < 4; ++c) {
                 if (!encode_plane_rows(planes[c], L.width(), L.height(), rows, error)) {
-                    error = "layer " + std::to_string(ri) + ": " + error;
+                    error = "layer " + std::to_string(ri) + ": RLE row too long for PSD";
                     return false;
                 }
-                uint64_t len = 2 + uint64_t(L.height()) * 2u; // compression + row counts
-                for (const std::vector<uint8_t> &row : rows)
-                    len += row.size();
+                const uint64_t len = channel_length(rows);
                 if (len > 0xFFFFFFFFull) {
                     error = "layer channel data too large for PSD";
                     return false;
@@ -414,52 +484,86 @@ bool serialize_to(detail::ByteBuf &out, const Document &doc, std::string &error)
             if (key_ok)
                 blend_key = L.blend_key;
         }
-        const uint8_t opacity = to_psd_opacity(L.opacity);
-        write_common_record(w, has_pixels ? L.top : 0, has_pixels ? L.left : 0, has_pixels ? L.bottom : 0,
-                            has_pixels ? L.right : 0, chan_ids, chan_lengths, blend_key.c_str(), opacity, L.clipped,
-                            L.visible, L.name, "luni", name_payload(L.name));
-        // Channel data in chan_ids order (-1, 0, 1, 2). The declared channel
-        // length intentionally counts compression + row counts + row data but
-        // not the 2-byte compression tag: Photoshop's own files declare the
-        // value including it, so readers must treat it as a hint (ours does).
+        write_record_header(lw, L.top, L.left, L.bottom, L.right, chan_ids, chan_lengths, blend_key.c_str(),
+                            to_psd_opacity(L.opacity), L.clipped, L.visible, L.name, "luni", name_payload(L.name));
+        // Channel data in chan_ids order (-1, 0, 1, 2); the declared length
+        // covers everything after the channel's 4-byte length field.
         if (has_pixels) {
             for (size_t c = 0; c < 4; ++c) {
                 if (!encode_plane_rows(planes[c], L.width(), L.height(), rows, error))
-                    return false;
-                w.u16(1); // RLE
-                for (size_t y = 0; y < rows.size(); ++y) {
-                    const std::vector<uint8_t> &row = rows[y];
-                    w.u16(uint16_t(row.size()));
-                }
-                for (size_t y = 0; y < rows.size(); ++y) {
-                    const std::vector<uint8_t> &row = rows[y];
-                    w.bytes(row.data(), row.size());
-                }
+                    return false; // cannot happen: checked above
+                append_channel(lw, rows);
             }
         }
     }
-    w.end_len(li_at);
-    // The layer & mask section must also contain the global layer mask info
-    // (4-byte length + payload). Without it layout_end in readers lands 4 bytes
-    // early and the composite would be parsed from the wrong offset.
+    if (lw.buf.overflowed()) {
+        error = "document too large for one write";
+        return false;
+    }
+    const size_t li_bytes = lw.size();
+
+    // --- file header, resources, layer & mask section ----------------------
+    detail::Writer w;
+    w.buf.attach(out.data(), out.capacity());
+    w.str4("8BPS");
+    w.u16(1);   // version
+    w.zeros(6); // reserved
+    w.u16(4);   // channels
+    w.u32(uint32_t(H));
+    w.u32(uint32_t(W));
+    w.u16(8); // depth
+    w.u16(3); // RGB
+    w.u32(0); // colour mode data length
+
+    // Image resources: just the layer selection id.
     {
+        const size_t at = w.begin_len();
+        const std::vector<uint8_t> lnsr(4, 0); // no layer selected
+        write_block(w, "lnsr", lnsr);
+        w.end_len(at);
+    }
+
+    const size_t lam_at = w.begin_len();
+    {
+        const size_t li_at = w.begin_len();
+        for (size_t q = 0; q < li_bytes; ++q)
+            w.u8(li_mem.data()[q]);
+        w.end_len(li_at);
         const size_t gmask_at = w.begin_len();
         w.end_len(gmask_at); // empty global layer mask info
+        w.end_len(lam_at);
     }
-    w.end_len(lam_at);
 
-    // Flattened composite: RLE, RGB only (no alpha channel, per contract).
-    w.u16(1); // RLE
-    for (int c = 1; c <= 3; ++c) // planes[1..3] are premultiplied R, G, B
-        append_composite_plane(w, flat_planes[size_t(c)], W, H);
+    // --- flattened composite: RLE, colour planes only ----------------------
+    // PSD image data = ONE 2-byte compression tag, then per plane
+    // (h * 2-byte row counts + the packed rows) with no per-plane tag.
+    w.u16(1); // compression: RLE
+    std::vector<uint8_t> plane(size_t(W) * size_t(H));
+    for (size_t c = 0; c < 3; ++c) {
+        for (size_t i = 0; i < plane.size(); ++i) {
+            // The flattened preview has no alpha plane, so colour is stored as-is
+            // (premultiplying here would darken it by the source alpha).
+            plane[i] = flat[i * 4 + size_t(c)];
+        }
+        if (!encode_plane_rows(plane, W, H, rows, error)) {
+            error = "composite row too long for PSD";
+            return false;
+        }
+        for (const std::vector<uint8_t> &row : rows)
+            w.u16(uint16_t(row.size()));
+        for (const std::vector<uint8_t> &row : rows)
+            w.bytes(row.data(), row.size());
+    }
 
     if (w.buf.overflowed()) {
         error = "document too large for one write";
         return false;
     }
-    out.attach(w.buf.data(), out.capacity());
+    // Report the finished image back through `out` (one contiguous append).
+    const size_t total = w.size();
+    out.attach(w.buf.data(), w.buf.capacity());
     out.clear();
-    if (!out.append(w.buf.data(), w.buf.size())) {
+    if (!out.append(w.buf.data(), total)) {
         error = "out of memory";
         return false;
     }
@@ -484,7 +588,8 @@ bool write_memory(std::vector<uint8_t> &out, const Document &doc, std::string &e
         detail::ByteBuf view;
         view.attach(mem.get(), cap);
         std::string e2;
-        if (serialize_to(view, doc, e2)) {
+        const bool ok = serialize_to(view, doc, e2);
+        if (ok) {
             out.clear();
             try {
                 out.reserve(view.size());
@@ -524,7 +629,8 @@ bool write_file(const std::string &path, const Document &doc, std::string &error
         mem.reset(p);
         view.attach(mem.get(), cap);
         std::string e2;
-        if (serialize_to(view, doc, e2)) {
+        const bool sok = serialize_to(view, doc, e2);
+        if (sok) {
             ok = true;
             break;
         }
@@ -536,23 +642,20 @@ bool write_file(const std::string &path, const Document &doc, std::string &error
         error = serr.empty() ? "out of memory" : serr;
         return false;
     }
+    const size_t n = view.size();
+    if (n == 0) {
+        error = "internal error: empty serialisation";
+        return false;
+    }
     FILE *f = std::fopen(path.c_str(), "wb");
     if (f == nullptr) {
         error = "cannot open output file: " + path;
         return false;
     }
-    size_t wrote = 0;
-    if (view.size() != 0) {
-        const uint8_t *src = view.data();
-        for (size_t q = 0; q < view.size(); ++q) {
-            if (std::fputc(src[q], f) == EOF)
-                break;
-            ++wrote;
-        }
-    }
+    size_t wrote = std::fwrite(view.data(), 1, n, f);
     const bool flush_ok = std::fflush(f) == 0;
     const bool close_ok = std::fclose(f) == 0;
-    if (wrote != view.size() || !flush_ok || !close_ok) {
+    if (wrote != n || !flush_ok || !close_ok) {
         error = "failed to write whole file";
         std::remove(path.c_str());
         return false;
