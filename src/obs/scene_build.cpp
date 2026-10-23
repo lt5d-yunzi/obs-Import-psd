@@ -338,6 +338,41 @@ struct BuildState {
 	std::vector<MissingFont> missing_fonts;
 };
 
+// Builds a plain OBS text source for a PSD type layer. Used when the PSD's font
+// is not installed: OBS picks a font it can actually render (and the user can
+// edit the text, font and colour directly in OBS), instead of our renderer
+// silently substituting a face.
+obs_source_t *create_obs_text_source(BuildState &st, const psd::Layer &layer, double fit)
+{
+	(void)fit;
+	obs_data_t *settings = obs_data_create();
+	obs_data_set_string(settings, "text", layer.text.c_str());
+	// Leave the font empty so OBS falls back to its own font stack, which is
+	// guaranteed to exist on this machine.
+	obs_data_set_string(settings, "font", "");
+
+	const double *c = st.text_style_valid ? st.text_color : layer.text_color;
+	const uint32_t r = uint32_t(std::max(0.0, std::min(1.0, c[0])) * 255.0);
+	const uint32_t g = uint32_t(std::max(0.0, std::min(1.0, c[1])) * 255.0);
+	const uint32_t b = uint32_t(std::max(0.0, std::min(1.0, c[2])) * 255.0);
+	const uint32_t color = (0xFFu << 24) | (r << 16) | (g << 8) | b;
+	obs_data_set_int(settings, "color1", color);
+	obs_data_set_int(settings, "color2", color);
+	obs_data_set_bool(settings, "outline", st.text_style_valid && st.text_stroke);
+	obs_data_set_bool(settings, "drop_shadow", false);
+	obs_data_set_int(settings, "align", OBS_ALIGN_LEFT);
+	obs_data_set_bool(settings, "word_wrap", false);
+
+	obs_source_t *src = obs_source_create("text_ft2_source_v2", layer.name.c_str(), settings, nullptr);
+	obs_data_release(settings);
+	if (!src) {
+		st.err = "could not create text_ft2_source_v2 for layer '" + layer.name + "'";
+		return nullptr;
+	}
+	st.images.push_back(src); // same bookkeeping: released once the items hold a ref
+	return src;
+}
+
 // Renders a PSD type layer with CoreText and imports the bitmap as an image
 // source. A text source would show missing-glyph boxes whenever the PSD's font
 // is absent (common), so rendering gives a faithful, font-independent picture.
@@ -356,6 +391,20 @@ obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double
 	req.stroke_width = st.text_style_valid ? st.text_stroke_width : layer.stroke_size;
 	for (int i = 0; i < 4; ++i)
 		req.stroke_color[i] = st.text_style_valid ? st.text_stroke_color[i] : layer.stroke_color[i];
+
+	// PSD fonts are frequently not installed. When that happens the user asked
+	// for an OBS text source instead of a rendered bitmap: it stays editable and
+	// OBS provides a font it can actually display.
+	const bool psd_font_ok = layer.text_font.empty() || psd::font_is_usable(layer.text_font);
+	if (!psd_font_ok) {
+		blog(LOG_WARNING,
+		     "[obs-psd] layer '%s' uses font '%s' which is not installed; using an OBS text source "
+		     "(install the font and re-import to keep the original styling)",
+		     layer.name.c_str(), layer.text_font.c_str());
+		if (obs_source_t *fallback = create_obs_text_source(st, layer, fit))
+			return fallback;
+		// Fall through to the renderer if OBS could not create the source.
+	}
 
 	psd::TextRenderResult res;
 	if (!psd::render_text_layer(req, res)) {
