@@ -427,6 +427,10 @@ bool serialize_to(detail::ByteBuf &out, const Document &doc, std::string &error)
     lw.buf.attach(li_mem.data(), li_mem.size());
     lw.u16(uint16_t(records.size())); // negative convention: see below
     std::vector<std::vector<uint8_t>> rows;
+    // PSD stores every record header first, then all channel image data in
+    // record order. Collect the planes here and emit them after the loop.
+    std::vector<std::vector<std::vector<uint8_t>>> all_planes;
+    std::vector<std::pair<int32_t, int32_t>> all_sizes; // (w, h) per record
     for (size_t ri = 0; ri < records.size(); ++ri) {
         const Record &rec = records[ri];
         if (rec.divider != 0) {
@@ -436,6 +440,8 @@ bool serialize_to(detail::ByteBuf &out, const Document &doc, std::string &error)
             const bool visible = rec.divider == kDivOpen;
             write_record_header(lw, rec.t, rec.l, rec.b, rec.r, {}, {}, "norm", 0, false, visible, rec.name, "lsct",
                                 payload);
+            all_planes.emplace_back(); // dividers carry no channel data
+            all_sizes.emplace_back(0, 0);
             continue;
         }
         const Layer &L = *rec.layer;
@@ -486,14 +492,21 @@ bool serialize_to(detail::ByteBuf &out, const Document &doc, std::string &error)
         }
         write_record_header(lw, L.top, L.left, L.bottom, L.right, chan_ids, chan_lengths, blend_key.c_str(),
                             to_psd_opacity(L.opacity), L.clipped, L.visible, L.name, "luni", name_payload(L.name));
-        // Channel data in chan_ids order (-1, 0, 1, 2); the declared length
-        // covers everything after the channel's 4-byte length field.
-        if (has_pixels) {
-            for (size_t c = 0; c < 4; ++c) {
-                if (!encode_plane_rows(planes[c], L.width(), L.height(), rows, error))
-                    return false; // cannot happen: checked above
-                append_channel(lw, rows);
-            }
+        all_planes.push_back(std::move(planes));
+        all_sizes.emplace_back(L.width(), L.height());
+    }
+
+    // --- channel image data, in record order -------------------------------
+    for (size_t ri = 0; ri < all_planes.size(); ++ri) {
+        const std::vector<std::vector<uint8_t>> &planes = all_planes[ri];
+        if (planes.empty())
+            continue;
+        const int32_t pw = all_sizes[ri].first;
+        const int32_t ph = all_sizes[ri].second;
+        for (size_t c = 0; c < planes.size(); ++c) {
+            if (!encode_plane_rows(planes[c], pw, ph, rows, error))
+                return false;
+            append_channel(lw, rows);
         }
     }
     if (lw.buf.overflowed()) {

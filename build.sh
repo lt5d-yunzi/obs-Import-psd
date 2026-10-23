@@ -18,6 +18,7 @@ CXX_FLAGS=(
   -I"$HERE/third_party/obs-headers/libobs"
   -I"$HERE/third_party/obs-headers/frontend-api"
   -I"$HERE/third_party/simde"
+  -I"$HERE/third_party/miniz"
   -I"$HERE/third_party/qt-headers/include"
   -I"$HERE/third_party/qt-headers/src/corelib"
   -I"$HERE/third_party/qt-headers/src/gui"
@@ -33,6 +34,10 @@ SOURCES=(
   src/psd/psd_write.cpp
   src/psd/psd_buf.cpp
   src/psd/rle.cpp
+  third_party/miniz/miniz.c
+  third_party/miniz/miniz_tdef.c
+  third_party/miniz/miniz_tinfl.c
+  third_party/miniz/miniz_zip.c
   src/obs/source_render.cpp
   src/obs/scene_build.cpp
   src/obs/scene_export.cpp
@@ -42,7 +47,7 @@ SOURCES=(
 mkdir -p "$OUT"
 BUNDLE="$OUT/$NAME.plugin"
 rm -rf "$BUNDLE"
-mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources/data/locale"
+mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources/locale" "$BUNDLE/Contents/Resources/data/locale"
 
 echo "== compiling =="
 clang++ "${CXX_FLAGS[@]}" \
@@ -72,7 +77,7 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-cp data/locale/*.ini "$BUNDLE/Contents/Resources/data/locale/"
+cp data/locale/*.ini "$BUNDLE/Contents/Resources/locale/"
 
 echo "== done: $BUNDLE =="
 ls -la "$BUNDLE/Contents/MacOS/"

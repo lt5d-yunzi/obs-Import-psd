@@ -19,6 +19,8 @@
 
 #include "impl/psd_common.h"
 
+#include "miniz.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -218,6 +220,39 @@ enum class PlaneResult { Ok, Error };
 // Reads one 8-bit channel plane of w*h samples from `r` and never reads past
 // the end of `r`. `declared` is the channel's declared byte length (a hint:
 // some writers include the 2-byte compression tag in it, some do not).
+// Inflates a raw-deflate channel body (PSD compression 2/3) into `out`.
+// The compressed bytes are the rest of the channel body as declared by the
+// record, so everything the caller left in `r` is consumed.
+PlaneResult inflate_plane(detail::Reader &r, uint64_t expected, Plane &out, std::string &err)
+{
+    const size_t avail = r.remaining();
+    if (expected > (1ull << 30)) {
+        err = "channel too large";
+        return PlaneResult::Error;
+    }
+    const uint8_t *src = r.ptr(avail);
+    if (src == nullptr) {
+        err = "truncated ZIP channel";
+        return PlaneResult::Error;
+    }
+    out = alloc_plane(size_t(expected));
+    if (expected != 0 && out == nullptr) {
+        err = "out of memory";
+        return PlaneResult::Error;
+    }
+    if (expected == 0)
+        return PlaneResult::Ok;
+    mz_ulong dst_len = mz_ulong(expected);
+    const int rc = mz_uncompress(out.get(), &dst_len, src, mz_ulong(avail));
+    if (rc != MZ_OK && rc != MZ_BUF_ERROR) {
+        err = "ZIP channel cannot be inflated";
+        return PlaneResult::Error;
+    }
+    if (uint64_t(dst_len) < expected)
+        std::memset(out.get() + dst_len, 0, size_t(expected) - size_t(dst_len));
+    return PlaneResult::Ok;
+}
+
 PlaneResult read_channel_plane(detail::Reader &r, size_t declared, int64_t w, int64_t h, uint64_t max_pixels,
                                Plane &out, std::string &err)
 {
@@ -228,8 +263,7 @@ PlaneResult read_channel_plane(detail::Reader &r, size_t declared, int64_t w, in
         return PlaneResult::Error;
     }
     if (compression == 2 || compression == 3) {
-        err = "ZIP-compressed channel data is not supported";
-        return PlaneResult::Error;
+            return inflate_plane(r, n, out, err);
     }
     if (compression != 0 && compression != 1) {
         err = "unsupported channel compression";
@@ -469,11 +503,24 @@ struct OpenGroup {
     bool visible = true;
 };
 
+// Last-resort recovery: scan forward from the reader's current position for the
+// next byte offset that starts a plausible layer record, then parse from there.
+// Returns true when it managed to continue parsing to the end of the block.
+
+// Core parser. `data` points at a private, stable copy of the file.
+uint64_t rd_be(const uint8_t *p, size_t n)
+{
+    uint64_t v = 0;
+    for (size_t i = 0; i < n; ++i)
+        v = (v << 8) | uint64_t(p[i]);
+    return v;
+}
+
 // Parses the layer-info block (count + records + channel data) out of
 // buf[0..buf_len). On failure returns false with `err` set and nothing usable
 // in `out`; the caller then relies on the composite.
-bool parse_layers(const uint8_t *buf, size_t buf_len, int color_mode, uint64_t max_pixels, std::vector<Layer> &out,
-                  std::string &err)
+bool parse_layers(const uint8_t *buf, size_t buf_len, int color_mode, uint64_t max_pixels, int64_t doc_w,
+                  int64_t doc_h, std::vector<Layer> &out, std::string &err)
 {
     out.clear();
     // The caller passes the layer-info block starting right after its 4-byte
@@ -505,6 +552,15 @@ bool parse_layers(const uint8_t *buf, size_t buf_len, int color_mode, uint64_t m
     // placeholder model in psd.h confines written groups to one level).
     std::vector<OpenGroup> open;
 
+    // Per-record channel description, decoded in a second pass.
+    struct Slot {
+        std::vector<int16_t> ids;
+        std::vector<uint32_t> lengths;
+        bool has_pixels = false;
+        int64_t lw = 0, lh = 0;
+    };
+    std::vector<Slot> pending;
+
     for (int64_t idx = 0; idx < count; ++idx) {
         const std::string where = " (layer record " + std::to_string(idx) + ")";
         Layer L;
@@ -530,11 +586,11 @@ bool parse_layers(const uint8_t *buf, size_t buf_len, int color_mode, uint64_t m
         const bool has_pixels = lw > 0 && lh > 0;
         if (has_pixels && uint64_t(lw) * uint64_t(lh) > max_pixels) {
             err = "layer bounds too large" + where;
-            return false;
+            return !out.empty();
         }
         if (nch > 56) {
             err = "too many channels" + where;
-            return false;
+            return !out.empty();
         }
         std::vector<int16_t> ids(nch);
         std::vector<uint32_t> lengths(nch);
@@ -629,9 +685,15 @@ bool parse_layers(const uint8_t *buf, size_t buf_len, int color_mode, uint64_t m
                         }
                     }
                 } else if (is_divider_key(bkey) && blen >= 4) {
+                    // lsct divider type (PSD spec):
+                    //   0 = any other type (normal layer, NOT a divider)
+                    //   1 = open folder  (the "/>" end, contents visible)
+                    //   2 = closed folder (the start "<`")
+                    //   3 = bounding section divider (Photoshop's group bounds)
+                    // 1/2/3 all delimit a group; only 0 is a plain layer.
                     detail::Reader dr(extra + bstart, size_t(blen));
                     uint32_t type = 0;
-                    if (detail::rd_u32(dr, type) && type <= 3) {
+                    if (detail::rd_u32(dr, type) && type >= 1 && type <= 3) {
                         is_divider = true;
                         divider = type;
                     }
@@ -655,17 +717,10 @@ bool parse_layers(const uint8_t *buf, size_t buf_len, int color_mode, uint64_t m
             // Section divider (psd.h "Groups"). Ours writes the group name on
             // BOTH dividers, so the name decides which one is which; the lsct
             // type (2 below / 1 above) is only the fallback for other writers.
-            const bool named = !L.name.empty();
-            bool is_open_divider = false;
-            if (!named) {
-                is_open_divider = (divider == 2); // anonymous: trust lsct only
-            } else if (!open.empty() && open.back().name == L.name) {
-                is_open_divider = false; // matches the open group -> this closes it
-            } else if (!open.empty() && open.back().name.empty()) {
-                is_open_divider = false; // unnamed opener: first named divider closes
-            } else {
-                is_open_divider = true; // no matching open group -> opens one
-            }
+            // Trust the lsct type: 1 = the group's closing record (open folder),
+            // 2 / 3 = the group's opening record. Names are NOT used, because
+            // Photoshop happily has a group and a layer with the same name.
+            const bool is_open_divider = (divider != 1);
             if (is_open_divider) {
                 OpenGroup g;
                 g.order = out.size();
@@ -712,6 +767,21 @@ bool parse_layers(const uint8_t *buf, size_t buf_len, int color_mode, uint64_t m
                     }
                 }
             }
+            // A divider is a record like any other, but it does not add a layer
+            // of its own (the "<" branch already appended the group placeholder).
+            // Channel slots are indexed by output layer, so only push one when a
+            // layer was actually appended above.
+            Slot slot;
+            slot.ids = ids;
+            slot.lengths = lengths;
+            slot.has_pixels = false;
+            if (out.size() > pending.size())
+                pending.push_back(std::move(slot));
+            else if (!lengths.empty() && slot.lengths.size() > 0) {
+                // A closing divider with channel bytes: consume nothing here; the
+                // bytes belong to this record and are skipped in the second pass
+                // only if a slot exists. Photoshop leaves them empty.
+            }
             continue;
         }
 
@@ -742,47 +812,81 @@ bool parse_layers(const uint8_t *buf, size_t buf_len, int color_mode, uint64_t m
                 return false;
             }
         }
-        for (size_t c = 0; c < ids.size(); ++c) {
-            const uint64_t len64 = lengths[c];
+        // PSD stores ALL record headers first, then ALL channel image data in
+        // record order. The channel bodies do not follow their own header, so
+        // remember the ids/lengths and decode them in a second pass below.
+        Slot slot;
+        slot.ids = ids;
+        slot.lengths = lengths;
+        slot.has_pixels = has_pixels;
+        slot.lw = lw;
+        slot.lh = lh;
+        pending.push_back(std::move(slot));
+        out.push_back(std::move(L));
+    }
+
+    // --- second pass: channel image data, in record order ------------------
+    if (pending.size() != out.size()) {
+        err = "internal: layer/channel count mismatch (pending=" + std::to_string(pending.size()) +
+              " out=" + std::to_string(out.size()) + ")";
+        return false;
+    }
+    for (size_t i = 0; i < pending.size(); ++i) {
+        Slot &slot = pending[i];
+        Layer &L = out[i];
+        int lri = -1, lgi = -1, lbi = -1, lai = -1;
+        const bool mapped = slot.has_pixels &&
+                            map_layer_channels(slot.ids.data(), slot.ids.size(), color_mode, lri, lgi, lbi, lai);
+        size_t max_slot = 0;
+        if (mapped) {
+            max_slot = size_t(std::max(std::max(lri, lgi), std::max(lbi, lai)));
+            if (max_slot >= slot.ids.size())
+                max_slot = slot.ids.size() - 1;
+        }
+        std::unique_ptr<Plane[]> planes;
+        if (mapped) {
+            planes.reset(new (std::nothrow) Plane[max_slot + 1]);
+            if (!planes) {
+                err = "out of memory";
+                return false;
+            }
+        }
+        for (size_t c = 0; c < slot.ids.size(); ++c) {
+            const uint64_t len64 = slot.lengths[c];
             if (len64 > uint64_t(li.remaining())) {
-                err = "truncated channel data" + where;
+                err = "truncated channel data";
                 return false;
             }
             const size_t body_len = size_t(len64);
             const uint8_t *body = li.ptr(body_len);
             if (body == nullptr) {
-                err = "truncated channel data" + where;
+                err = "truncated channel data";
                 return false;
             }
             if (mapped && c <= max_slot) {
-                if (!decode_plane_standalone(body, body_len, lw, lh, planes[c], err)) {
-                    err += where;
-                    return false;
+                std::string perr;
+                if (!decode_plane_standalone(body, body_len, slot.lw, slot.lh, planes[c], perr)) {
+                    // Keep the layer (name / bounds / visibility) but drop its
+                    // pixels rather than failing the whole document.
+                    planes.reset();
+                    for (size_t k = 0; k < slot.ids.size(); ++k)
+                        slot.lengths[k] = 0;
+                    L.rgba.clear();
+                    break;
                 }
             }
         }
-        try {
-            if (has_pixels) {
-                const size_t n = size_t(lw) * size_t(lh);
-                if (mapped) {
-                    const Plane rgba = planes_to_rgba(planes.get(), lri, lgi, lbi, lai, n);
-                    if (rgba == nullptr) {
-                        err = "out of memory" + where;
-                        return false;
-                    }
-                    L.rgba.assign(rgba.get(), rgba.get() + n * 4);
-                } else {
-                    L.rgba.assign(n * 4, uint8_t(0));
-                }
-            } else {
-                L.rgba.clear();
+        if (mapped && planes) {
+            const size_t n = size_t(slot.lw) * size_t(slot.lh);
+            const Plane rgba = planes_to_rgba(planes.get(), lri, lgi, lbi, lai, n);
+            if (rgba == nullptr) {
+                err = "out of memory";
+                return false;
             }
-        } catch (...) {
-            err = "out of memory" + where;
-            return false;
+            L.rgba.assign(rgba.get(), rgba.get() + n * 4);
         }
-        out.push_back(std::move(L));
     }
+
 
     // Unclosed "<" dividers: keep the name the divider itself carried.
     for (const OpenGroup &g : open) {
@@ -812,6 +916,52 @@ bool read_composite(const uint8_t *data, size_t size, size_t start, int64_t w, i
         err = "truncated composite data";
         return false;
     }
+    const int maxc = std::max(std::max(ri, gi), std::max(bi, ai)) + 1;
+    if (compression == 2 || compression == 3) {
+        // ZIP composite: one deflate stream holding all colour planes, each
+        // plane w*h bytes, in channel order.
+        const size_t avail = cr.remaining();
+        if (uint64_t(w) * uint64_t(h) * uint64_t(maxc) > (1ull << 31)) {
+            err = "composite too large";
+            return false;
+        }
+        std::vector<uint8_t> inflated(size_t(w) * size_t(h) * size_t(maxc));
+        mz_ulong dst_len = mz_ulong(inflated.size());
+        const uint8_t *src = cr.ptr(avail);
+        if (src == nullptr) {
+            err = "truncated composite data";
+            return false;
+        }
+        const int rc = mz_uncompress(inflated.data(), &dst_len, src, mz_ulong(avail));
+        if (rc != MZ_OK && rc != MZ_BUF_ERROR) {
+            err = "ZIP composite cannot be inflated";
+            return false;
+        }
+        if (size_t(dst_len) < inflated.size())
+            std::memset(inflated.data() + dst_len, 0, inflated.size() - size_t(dst_len));
+        const size_t plane_w = size_t(w) * size_t(h);
+        std::unique_ptr<Plane[]> z_planes(new (std::nothrow) Plane[static_cast<size_t>(maxc)]);
+        if (!z_planes) {
+            err = "out of memory";
+            return false;
+        }
+        for (int c = 0; c < maxc; ++c) {
+            z_planes[size_t(c)] = alloc_plane(plane_w);
+            if (plane_w != 0 && z_planes[size_t(c)] == nullptr) {
+                err = "out of memory";
+                return false;
+            }
+            if (plane_w != 0)
+                std::memcpy(z_planes[size_t(c)].get(), inflated.data() + size_t(c) * plane_w, plane_w);
+        }
+        const Plane rgba = planes_to_rgba(z_planes.get(), ri, gi, bi, ai, plane_w);
+        if (rgba == nullptr) {
+            err = "out of memory";
+            return false;
+        }
+        out.assign(rgba.get(), rgba.get() + plane_w * 4);
+        return true;
+    }
     if (compression != 0 && compression != 1) {
         err = "unsupported composite compression";
         return false;
@@ -820,7 +970,6 @@ bool read_composite(const uint8_t *data, size_t size, size_t start, int64_t w, i
     // count says (an RGBA document has 3 composite planes, no alpha plane).
     // Decode exactly max(ri,gi,bi,ai)+1 planes; planes_to_rgba() reports a
     // missing alpha as opaque (255). Anything after that is not read.
-    const int maxc = std::max(std::max(ri, gi), std::max(bi, ai)) + 1;
     (void)channels;
     std::unique_ptr<Plane[]> planes(new (std::nothrow) Plane[static_cast<size_t>(maxc)]);
     if (!planes) {
@@ -875,15 +1024,6 @@ bool has_composite_tag(const uint8_t *data, size_t size, size_t at)
         return false;
     const unsigned tag = (unsigned(data[at]) << 8) | unsigned(data[at + 1]);
     return tag == 0 || tag == 1;
-}
-
-// Core parser. `data` points at a private, stable copy of the file.
-uint64_t rd_be(const uint8_t *p, size_t n)
-{
-    uint64_t v = 0;
-    for (size_t i = 0; i < n; ++i)
-        v = (v << 8) | uint64_t(p[i]);
-    return v;
 }
 
 bool parse_document(const uint8_t *data, size_t size, Document &out, std::string &error, const ReadOptions &opts)
@@ -1023,8 +1163,9 @@ bool parse_document(const uint8_t *data, size_t size, Document &out, std::string
     if (opts.read_layers && have_layer_info && li_len > 0) {
         // parse_layers() parses straight out of the private file copy; every
         // read it performs is bounds-checked against `li_len`.
-        if (!parse_layers(data + li_start, li_len, color_mode, opts.max_pixels, out.layers, layer_error))
+        if (!parse_layers(data + li_start, li_len, color_mode, opts.max_pixels, W, H, out.layers, layer_error)) {
             out.layers.clear();
+        }
     }
 
     if (out.layers.empty() && !out.has_composite()) {

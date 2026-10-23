@@ -196,20 +196,24 @@ def parse(path):
             "lsct": lsct,
             "channel_data": [],
         }
-        # `chans` holds (id, declared_length, absolute_offset) where the offset
-        # points at the channel's own 2-byte compression tag (PSD declares the
-        # length of everything from that tag onwards). The channel bodies are
-        # contiguous, so `at` for the next channel is simply at + clen.
-        # Channel bodies are contiguous and start right after the record's
-        # extra data. `chans_off` is the absolute start of the first body.
-        body_at = chans_off
-        for (cid, clen) in chans:
+        # PSD stores all record headers first, then all channel image data in
+        # record order. Keep the (id, len) pairs; decode after the loop.
+        rec["chans"] = chans
+        records.append(rec)
+    headers_end = r.pos
+
+    # --- second pass: channel image data, in record order ------------------
+    r.pos = headers_end
+    body_at = headers_end
+    for idx, rec in enumerate(records):
+        left_, top_, right_, bottom_ = rec["bounds"]
+        h = bottom_ - top_
+        w = right_ - left_
+        for (cid, clen) in rec["chans"]:
             body = data[body_at:body_at + clen]
             if len(body) != clen:
-                raise ParseError("channel data truncated in record %d" % idx)
+                raise ParseError("channel data truncated in record %d (at %d len %d)" % (idx, body_at, clen))
             comp = struct.unpack_from(">H", body, 0)[0]
-            h = bottom - top
-            w = right - left
             if comp != 1:
                 raise ParseError("channel compression %d in record %d" % (comp, idx))
             if len(body) < 2 + 2 * h:
@@ -217,7 +221,8 @@ def parse(path):
             counts = struct.unpack_from(">%dH" % h, body, 2)
             packed = body[2 + 2 * h:]
             if len(packed) < sum(counts):
-                raise ParseError("channel RLE rows truncated in record %d" % idx)
+                raise ParseError("channel RLE rows truncated in record %d: need %d have %d (body_at %d, clen %d)"
+                                 % (idx, sum(counts), len(packed), body_at, clen))
             plane = bytearray()
             off = 0
             for c in counts:
@@ -227,8 +232,7 @@ def parse(path):
                 raise ParseError("channel size mismatch in record %d" % idx)
             rec["channel_data"].append((cid, bytes(plane)))
             body_at += clen
-        r.pos = body_at
-        records.append(rec)
+    r.pos = body_at
     res["records"] = records
     if r.pos != li_end:
         raise ParseError("layer info length mismatch (at %d, end %d)" % (r.pos, li_end))
