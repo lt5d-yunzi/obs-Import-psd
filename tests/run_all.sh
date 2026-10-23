@@ -10,6 +10,7 @@ SRC=(
   "$ROOT/src/psd/psd_write.cpp"
   "$ROOT/src/psd/psd_buf.cpp"
   "$ROOT/src/psd/rle.cpp"
+  "$ROOT/src/psd/psd_text.cpp"
   "$ROOT/third_party/miniz/miniz.c"
   "$ROOT/third_party/miniz/miniz_tdef.c"
   "$ROOT/third_party/miniz/miniz_tinfl.c"

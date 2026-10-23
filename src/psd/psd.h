@@ -70,6 +70,14 @@ struct Layer {
     // Straight (non-premultiplied) RGBA8. Empty when the layer has no pixels.
     std::vector<uint8_t> rgba;
 
+    // Set for PSD type layers: the text engine description decoded from the
+    // 8BIM/TySh block. `rgba` is empty for these layers (Photoshop stores no
+    // pixels), so importers should render `text` instead.
+    std::string text;
+    std::string text_font;
+    double text_size = 0;
+    double text_color[4] = {0, 0, 0, 1};
+
     // Read-only annotations derived from PSD section dividers (see above).
     // The writer ignores these.
     std::string group_name;

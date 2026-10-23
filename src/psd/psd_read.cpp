@@ -18,6 +18,7 @@
 #include "psd.h"
 
 #include "impl/psd_common.h"
+#include "psd_text.h"
 
 #include "miniz.h"
 
@@ -667,6 +668,16 @@ bool parse_layers(const uint8_t *buf, size_t buf_len, int color_mode, uint64_t m
                             detail::utf16_to_utf8(units.data(), units.size(), uname);
                             L.name = std::move(uname);
                         }
+                    }
+                } else if (std::memcmp(bkey, "TySh", 4) == 0 && blen >= 54) {
+                    // Type layer: decode the text engine description.
+                    TextStyle ts;
+                    if (parse_tysh(extra + bstart, size_t(blen), ts)) {
+                        L.text = ts.text;
+                        L.text_font = ts.font;
+                        L.text_size = ts.font_size;
+                        for (int ci = 0; ci < 4; ++ci)
+                            L.text_color[ci] = ts.color[ci];
                     }
                 } else if (is_divider_key(bkey) && blen >= 4) {
                     // lsct divider type (PSD spec):

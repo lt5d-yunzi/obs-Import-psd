@@ -272,6 +272,35 @@ struct BuildState {
 	std::string err;
 };
 
+// Builds an OBS text source for a PSD type layer. The text, font and size come
+// from the PSD's TySh block, so the result is real editable text rather than a
+// screenshot of the flattened composite.
+obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double fit)
+{
+	obs_data_t *settings = obs_data_create();
+	obs_data_set_string(settings, "text", layer.text.c_str());
+	obs_data_set_string(settings, "font", layer.text_font.empty() ? "Sans Serif" : layer.text_font.c_str());
+	// PSD stores the size in points; scale it to document pixels.
+	const double px = layer.text_size > 0 ? layer.text_size * fit : 48.0 * fit;
+	obs_data_set_int(settings, "font_size", (long long)(px > 1 ? px : 1));
+	obs_data_set_int(settings, "color1", 0xFFFFFFFF);
+	obs_data_set_int(settings, "color2", 0xFFFFFFFF);
+	obs_data_set_bool(settings, "outline", false);
+	obs_data_set_bool(settings, "drop_shadow", false);
+	obs_data_set_int(settings, "align", OBS_ALIGN_LEFT);
+	obs_data_set_bool(settings, "word_wrap", false);
+	obs_data_set_int(settings, "custom_width", layer.width() > 0 ? layer.width() : 0);
+
+	obs_source_t *src = obs_source_create_private("text_ft2_source_v2", layer.name.c_str(), settings);
+	obs_data_release(settings);
+	if (!src) {
+		st.err = "could not create text_ft2_source_v2 for layer '" + layer.name + "'";
+		return nullptr;
+	}
+	st.images.push_back(src);
+	return src;
+}
+
 // Builds an image source for one PSD layer (PNG written lazily on first use).
 obs_source_t *create_layer_source(BuildState &st, const psd::Layer &layer)
 {
@@ -315,22 +344,18 @@ bool is_group(const psd::Layer &l)
 // Adds one layer to `parent` (the root scene or a group's inner scene).
 bool add_layer(BuildState &st, obs_scene_t *parent, const psd::Layer &layer, const Placement &p)
 {
-	if (layer.empty() || layer.rgba.empty()) {
-		// Text and vector-shape layers store no pixels in a PSD (Photoshop
-		// renders them on the fly), so there is nothing to import for them.
-		// The flattened composite cannot be used as a substitute: it contains
-		// every layer stacked together, not this layer alone.
-		blog(LOG_INFO,
-		     "[obs-psd] layer '%s' has no pixel data (text/shape layer); rasterise it in "
-		     "Photoshop (Layer > Rasterize All Layers) before saving to import it",
-		     layer.name.c_str());
+	const bool is_text = !layer.text.empty();
+	if (layer.empty() || (layer.rgba.empty() && !is_text)) {
+		// Vector shape layers store no pixels in a PSD (Photoshop renders them on
+		// the fly) and carry no text, so there is nothing to import for them.
+		blog(LOG_INFO, "[obs-psd] layer '%s' has no pixel data (vector shape); skipped", layer.name.c_str());
 		return true;
 	}
 	if (layer.clipped)
 		blog(LOG_WARNING, "[obs-psd] layer '%s' uses a clipping mask; imported as a plain layer",
 		     layer.name.c_str());
 
-	obs_source_t *src = create_layer_source(st, layer);
+	obs_source_t *src = is_text ? create_text_source(st, layer, p.fit) : create_layer_source(st, layer);
 	if (!src)
 		return false;
 
