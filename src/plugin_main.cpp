@@ -10,6 +10,7 @@
 //           Image and text layers are always exported.
 #include "obs/obs_include.h"
 
+#include "obs/fix_groups.h"
 #include "obs/psd_ignore.h"
 #include "psd/psd.h"
 #include "ui/psd_ui.h"
@@ -31,11 +32,17 @@ void on_export_psd(void *)
     obspsd::run_export_dialog();
 }
 
+void on_fix_groups(void *)
+{
+    obspsd::fix_group_offsets();
+}
+
 void on_frontend_event(enum obs_frontend_event event, void *)
 {
     if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
         obs_frontend_add_tools_menu_item(obs_module_text("tools_menu.import"), on_import_psd, nullptr);
         obs_frontend_add_tools_menu_item(obs_module_text("tools_menu.export"), on_export_psd, nullptr);
+        obs_frontend_add_tools_menu_item(obs_module_text("tools_menu.fix_groups"), on_fix_groups, nullptr);
     }
 }
 

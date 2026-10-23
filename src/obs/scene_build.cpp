@@ -129,23 +129,49 @@ namespace {
 
 std::mutex g_files_mutex;
 std::vector<std::string> *g_kept_files = nullptr; // heap: no static dtor racing OBS shutdown
+std::string g_scene_image_dir;                    // where this scene's PNGs live
 
-std::string make_temp_image_path()
+// Directory that holds the PNGs of one imported scene:
+//   <user config>/obs-studio/obs-psd/<scene>/
+// The files must outlive the OBS process because the scene stores their paths;
+// writing to $TMPDIR made every layer disappear after a restart.
+std::string make_scene_image_dir(const std::string &scene_name)
 {
-	const char *tmp = getenv("TMPDIR");
-	if (!tmp || !*tmp)
-		tmp = "/tmp";
+	char *base = os_get_config_path_ptr("obs-studio/obs-psd");
+	std::string dir;
+	if (base != nullptr) {
+		dir = base;
+		bfree(base);
+	}
+	if (dir.empty())
+		dir = "/tmp/obs-psd";
 
+	// Sanitise the scene name: it becomes a directory component.
+	std::string safe;
+	safe.reserve(scene_name.size());
+	for (char c : scene_name) {
+		const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' ||
+				c == '_' || c == ' ';
+		safe.push_back(ok ? c : '_');
+	}
+	while (!safe.empty() && safe.back() == ' ')
+		safe.pop_back();
+	if (safe.empty())
+		safe = "scene";
+
+	dir += "/" + safe;
+	os_mkdirs(dir.c_str());
+	return dir;
+}
+
+std::string make_scene_image_path(const std::string &dir)
+{
 	static std::atomic<uint64_t> counter{0};
 	const uint64_t n = counter.fetch_add(1, std::memory_order_relaxed);
 	const uint64_t stamp = (uint64_t)os_gettime_ns();
 
 	char name[128];
-	std::snprintf(name, sizeof(name), "obs-psd-%llu-%llu.png", (unsigned long long)stamp, (unsigned long long)n);
-
-	std::string dir(tmp);
-	while (!dir.empty() && dir.back() == '/')
-		dir.pop_back();
+	std::snprintf(name, sizeof(name), "layer-%llu-%llu.png", (unsigned long long)stamp, (unsigned long long)n);
 	return dir + "/" + name;
 }
 
@@ -160,7 +186,13 @@ void apply_opacity(std::vector<uint8_t> &rgba, float opacity)
 }
 
 // Writes `layer` as a lossless PNG with its alpha channel intact.
-bool write_layer_png(const psd::Layer &layer, std::string &path_out, std::string &err)
+// Writes one layer as a PNG that covers the WHOLE canvas, with the layer's
+// pixels blitted at its document position. Importing a full-canvas image means
+// the scene item is always placed at (0,0) with scale 1, so the result does not
+// depend on how OBS interprets per-item transforms (which shifted items when a
+// group or a bounds mode was involved).
+bool write_layer_png(const psd::Layer &layer, int canvas_w, int canvas_h, bool full_canvas,
+		     std::string &path_out, std::string &err)
 {
 	const int w = layer.width();
 	const int h = layer.height();
@@ -176,13 +208,39 @@ bool write_layer_png(const psd::Layer &layer, std::string &path_out, std::string
 	std::vector<uint8_t> pixels = layer.rgba;
 	apply_opacity(pixels, layer.opacity);
 
+	int out_w = w;
+	int out_h = h;
+	if (full_canvas && canvas_w > 0 && canvas_h > 0) {
+		// Blit the layer into a transparent canvas-sized buffer.
+		std::vector<uint8_t> canvas(size_t(canvas_w) * size_t(canvas_h) * 4u, 0);
+		for (int y = 0; y < h; ++y) {
+			const int dy = layer.top + y;
+			if (dy < 0 || dy >= canvas_h)
+				continue;
+			for (int x = 0; x < w; ++x) {
+				const int dx = layer.left + x;
+				if (dx < 0 || dx >= canvas_w)
+					continue;
+				const uint8_t *src = &pixels[(size_t(y) * size_t(w) + size_t(x)) * 4u];
+				uint8_t *dst = &canvas[(size_t(dy) * size_t(canvas_w) + size_t(dx)) * 4u];
+				dst[0] = src[0];
+				dst[1] = src[1];
+				dst[2] = src[2];
+				dst[3] = src[3];
+			}
+		}
+		pixels.swap(canvas);
+		out_w = canvas_w;
+		out_h = canvas_h;
+	}
+
 	std::string path;
 	{
 		std::lock_guard<std::mutex> lock(g_files_mutex);
-		path = make_temp_image_path();
+		path = make_scene_image_path(g_scene_image_dir);
 	}
 
-	if (!stbi_write_png(path.c_str(), w, h, 4, pixels.data(), w * 4)) {
+	if (!stbi_write_png(path.c_str(), out_w, out_h, 4, pixels.data(), out_w * 4)) {
 		err = "could not write layer PNG: " + path;
 		return false;
 	}
@@ -206,6 +264,8 @@ struct Placement {
 	double fit = 1.0;      // document pixels -> canvas pixels
 	double origin_x = 0.0; // canvas coordinate of document pixel (0, 0)
 	double origin_y = 0.0;
+	int canvas_w = 0;      // OBS canvas size, used to render full-canvas layers
+	int canvas_h = 0;
 };
 
 Placement compute_placement(const psd::Document &doc, SceneBuildOptions::Placement mode)
@@ -223,6 +283,8 @@ Placement compute_placement(const psd::Document &doc, SceneBuildOptions::Placeme
 	if (!canvas_w || !canvas_h)
 		return p; // no video configured: fall back to 1:1
 
+	p.canvas_w = int(canvas_w);
+	p.canvas_h = int(canvas_h);
 	p.fit = std::min((double)canvas_w / (double)doc.width, (double)canvas_h / (double)doc.height);
 	p.origin_x = ((double)canvas_w - (double)doc.width * p.fit) * 0.5;
 	p.origin_y = ((double)canvas_h - (double)doc.height * p.fit) * 0.5;
@@ -231,25 +293,20 @@ Placement compute_placement(const psd::Document &doc, SceneBuildOptions::Placeme
 
 void place_item(obs_sceneitem_t *item, const psd::Layer &layer, const Placement &p)
 {
-	// Use OBS' bounds mode: the item is anchored TOP|LEFT at `pos` and forced to
-	// exactly (width, height) document pixels. This is the same representation
-	// the OBS UI produces when a source is scaled to a known size, and unlike
-	// scale it does not depend on the source's texture being loaded yet.
+	// Layers are written as full-canvas images (see write_layer_png), so the
+	// item's own position inside its image is already correct: pin it to the
+	// canvas origin and only apply the document->canvas scale. This avoids every
+	// per-item coordinate computation OBS performs for partial images.
+	(void)layer;
 	obs_sceneitem_set_alignment(item, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
-	obs_sceneitem_set_bounds_alignment(item, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
-	obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_SCALE_INNER);
+	obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_NONE);
 
 	struct vec2 pos;
-	vec2_set(&pos, (float)(p.origin_x + double(layer.left) * p.fit),
-		 (float)(p.origin_y + double(layer.top) * p.fit));
+	vec2_set(&pos, 0.0f, 0.0f);
 	obs_sceneitem_set_pos(item, &pos);
 
-	struct vec2 bounds;
-	vec2_set(&bounds, (float)(double(layer.width()) * p.fit), (float)(double(layer.height()) * p.fit));
-	obs_sceneitem_set_bounds(item, &bounds);
-
 	struct vec2 scale;
-	vec2_set(&scale, 1.0f, 1.0f);
+	vec2_set(&scale, (float)p.fit, (float)p.fit);
 	obs_sceneitem_set_scale(item, &scale);
 }
 
@@ -276,7 +333,7 @@ struct BuildState {
 // Renders a PSD type layer with CoreText and imports the bitmap as an image
 // source. A text source would show missing-glyph boxes whenever the PSD's font
 // is absent (common), so rendering gives a faithful, font-independent picture.
-obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double fit)
+obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double fit, int canvas_w, int canvas_h)
 {
 	psd::TextRenderRequest req;
 	req.text = layer.text;
@@ -303,12 +360,43 @@ obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double
 		     res.used_font.c_str());
 	}
 
+	// Same full-canvas convention as image layers: blit the rendered text at the
+	// layer's document position so the scene item can always sit at (0,0).
+	std::vector<uint8_t> canvas;
+	const uint8_t *pixels = res.rgba.data();
+	int out_w = res.width, out_h = res.height;
+	if (canvas_w > 0 && canvas_h > 0) {
+		canvas.assign(size_t(canvas_w) * size_t(canvas_h) * 4u, 0);
+		for (int y = 0; y < res.height; ++y) {
+			const int dy = layer.top + y;
+			if (dy < 0 || dy >= canvas_h)
+				continue;
+			for (int x = 0; x < res.width; ++x) {
+				const int dx = layer.left + x;
+				if (dx < 0 || dx >= canvas_w)
+					continue;
+				const uint8_t *s2 = &res.rgba[(size_t(y) * size_t(res.width) + size_t(x)) * 4u];
+				uint8_t *d2 = &canvas[(size_t(dy) * size_t(canvas_w) + size_t(dx)) * 4u];
+				const unsigned sa = s2[3];
+				if (sa == 0)
+					continue;
+				d2[0] = uint8_t(std::min(255u, (unsigned(s2[0]) * sa + 127u) / 255u));
+				d2[1] = uint8_t(std::min(255u, (unsigned(s2[1]) * sa + 127u) / 255u));
+				d2[2] = uint8_t(std::min(255u, (unsigned(s2[2]) * sa + 127u) / 255u));
+				d2[3] = uint8_t(sa);
+			}
+		}
+		pixels = canvas.data();
+		out_w = canvas_w;
+		out_h = canvas_h;
+	}
+
 	std::string path;
 	{
 		std::lock_guard<std::mutex> lock(g_files_mutex);
-		path = make_temp_image_path();
+		path = make_scene_image_path(g_scene_image_dir);
 	}
-	if (!stbi_write_png(path.c_str(), res.width, res.height, 4, res.rgba.data(), res.width * 4)) {
+	if (!stbi_write_png(path.c_str(), out_w, out_h, 4, pixels, out_w * 4)) {
 		st.err = "could not write rendered text PNG: " + path;
 		return nullptr;
 	}
@@ -334,10 +422,10 @@ obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double
 }
 
 // Builds an image source for one PSD layer (PNG written lazily on first use).
-obs_source_t *create_layer_source(BuildState &st, const psd::Layer &layer)
+obs_source_t *create_layer_source(BuildState &st, const psd::Layer &layer, int canvas_w, int canvas_h)
 {
 	std::string png;
-	if (!write_layer_png(layer, png, st.err))
+	if (!write_layer_png(layer, canvas_w, canvas_h, true, png, st.err))
 		return nullptr;
 
 	obs_data_t *settings = obs_data_create();
@@ -387,7 +475,8 @@ bool add_layer(BuildState &st, obs_scene_t *parent, const psd::Layer &layer, con
 		blog(LOG_WARNING, "[obs-psd] layer '%s' uses a clipping mask; imported as a plain layer",
 		     layer.name.c_str());
 
-	obs_source_t *src = is_text ? create_text_source(st, layer, p.fit) : create_layer_source(st, layer);
+	obs_source_t *src = is_text ? create_text_source(st, layer, p.fit, p.canvas_w, p.canvas_h)
+					     : create_layer_source(st, layer, p.canvas_w, p.canvas_h);
 	if (!src)
 		return false;
 
@@ -420,6 +509,25 @@ bool add_group(BuildState &st, obs_scene_t *parent, const psd::Document &doc, si
 		return false;
 	}
 
+	// OBS anchors a group scene's coordinate system at the group item's
+	// transform, and obs_scene_add_group() re-fits that transform to the
+	// members' bounding box whenever members are added. Members use DOCUMENT
+	// coordinates here, so pin the group at the placement origin with unit
+	// scale *before* adding anything; otherwise the group's derived offset is
+	// applied on top of every member position (which is exactly what made
+	// layers land tens of pixels off).
+	obs_sceneitem_set_alignment(group_item, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
+	obs_sceneitem_set_bounds_type(group_item, OBS_BOUNDS_NONE);
+	obs_sceneitem_set_bounds_alignment(group_item, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
+	{
+		struct vec2 gpos;
+		vec2_set(&gpos, (float)p.origin_x, (float)p.origin_y);
+		obs_sceneitem_set_pos(group_item, &gpos);
+		struct vec2 gscale;
+		vec2_set(&gscale, (float)p.fit, (float)p.fit);
+		obs_sceneitem_set_scale(group_item, &gscale);
+	}
+
 	blog(LOG_INFO, "[obs-psd] group '%s' contains %zu layer(s)", gl.name.c_str(), end - group_index - 1);
 
 	bool any_visible = false;
@@ -440,20 +548,6 @@ bool add_group(BuildState &st, obs_scene_t *parent, const psd::Document &doc, si
 		}
 	}
 
-	// OBS group scenes have their own coordinate system anchored at the group
-	// item's position. Members are placed with DOCUMENT coordinates, so the
-	// group item must sit at the placement origin with unit scale; otherwise the
-	// group's own offset would be applied on top of every member position.
-	{
-		obs_sceneitem_set_alignment(group_item, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
-		obs_sceneitem_set_bounds_type(group_item, OBS_BOUNDS_NONE);
-		struct vec2 gpos;
-		vec2_set(&gpos, (float)p.origin_x, (float)p.origin_y);
-		obs_sceneitem_set_pos(group_item, &gpos);
-		struct vec2 gscale;
-		vec2_set(&gscale, (float)p.fit, (float)p.fit);
-		obs_sceneitem_set_scale(group_item, &gscale);
-	}
 	// Group items have no opacity of their own in OBS (members already carry the
 	// baked opacity); the group rectangle is only a Photoshop metadata hint.
 	obs_sceneitem_set_visible(group_item, any_visible);
@@ -500,6 +594,10 @@ bool build_scene_from_psd(const psd::Document &doc, const char *scene_name, std:
 		err = "empty scene name";
 		return false;
 	}
+	// Layer PNGs are written next to the OBS config so the saved scene can find
+	// them after a restart.
+	g_scene_image_dir = make_scene_image_dir(scene_name);
+	blog(LOG_INFO, "[obs-psd] layer images -> %s", g_scene_image_dir.c_str());
 	if (doc.width <= 0 || doc.height <= 0) {
 		err = "document has no size";
 		return false;

@@ -42,6 +42,7 @@ SOURCES=(
   src/obs/source_render.cpp
   src/obs/scene_build.cpp
   src/obs/scene_export.cpp
+  src/obs/fix_groups.cpp
   src/obs/psd_ignore.cpp
   src/obs/text_render_macos.mm
 )
