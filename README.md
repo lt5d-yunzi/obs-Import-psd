@@ -50,12 +50,18 @@
 
 ---
 
-## 构建
+## 构建与验证
 
 ```bash
-./build.sh          # 产物：build/obs-psd.plugin
-./install.sh        # 复制到 dist/plugins（也可以传目标目录）
+./build.sh                 # 构建插件：build/obs-psd.plugin
+./tests/run_all.sh         # PSD 编解码三层验证（往返 / 独立解析 / fuzz）
+./install.sh [目标目录]    # 复制到 dist/plugins（默认）
 ```
+
+`tests/run_all.sh` 会做：
+1. C++ 往返测试（154 项断言：图层名 UTF-8、边界、透明度、可见性、像素、组、复合图、重写稳定性）；
+2. `tests/verify_psd.py` —— 只用 Python 标准库的**独立** PSD 解析器，交叉校验写出的文件；
+3. `tests/psd_fuzz` —— 20000 个随机变异/截断输入，ASAN + UBSAN 下要求零崩溃、零挂起、零静默失败。
 
 `install.sh` 默认写 `./dist/plugins`；要把插件装进 OBS，请复制到：
 
