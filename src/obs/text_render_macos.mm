@@ -71,8 +71,13 @@ bool font_is_usable(const std::string &font)
 	bool ok = false;
 	if (actual != nullptr) {
 		char buf[256] = {};
-		if (CFStringGetCString(actual, buf, sizeof buf, kCFStringEncodingUTF8))
-			ok = (font == buf); // a substitution means the font is missing
+		if (CFStringGetCString(actual, buf, sizeof buf, kCFStringEncodingUTF8)) {
+			// A missing font silently resolves to Helvetica. Accept the exact
+			// name, and also the "<requested>-Regular" form that some
+			// installed fonts report as their PostScript name.
+			const std::string resolved(buf);
+			ok = (resolved == font) || (resolved.rfind(font + "-", 0) == 0) || (font.rfind(resolved, 0) == 0);
+		}
 		CFRelease(actual);
 	}
 	if (ok) {
@@ -140,8 +145,12 @@ bool render_text_layer(const TextRenderRequest &req, TextRenderResult &out)
 		if (f != nullptr) {
 			CFStringRef actual = CTFontCopyPostScriptName(f);
 			char buf[256] = {};
-			const bool same = actual && CFStringGetCString(actual, buf, sizeof buf, kCFStringEncodingUTF8) &&
-					  req.font == buf;
+			std::string resolved;
+			const bool got_name = actual && CFStringGetCString(actual, buf, sizeof buf, kCFStringEncodingUTF8);
+			if (got_name)
+				resolved = buf;
+			const bool same = got_name && (resolved == req.font || resolved.rfind(req.font + "-", 0) == 0 ||
+						       req.font.rfind(resolved, 0) == 0);
 			if (actual)
 				CFRelease(actual);
 			if (same && font_covers(f, utf16)) {
@@ -189,8 +198,8 @@ bool render_text_layer(const TextRenderRequest &req, TextRenderResult &out)
 	const CGFloat a = CGFloat(std::max(0.0, std::min(1.0, req.color[3] <= 0.0 ? 1.0 : req.color[3])));
 
 	CGColorRef color = CGColorCreateGenericRGB(r, g, b, a);
-	const void *keys[] = {kCTFontAttributeName, kCTForegroundColorAttributeName};
-	const void *values[] = {font, color};
+	const void *keys[2] = {kCTFontAttributeName, kCTForegroundColorAttributeName};
+	const void *values[2] = {font, color};
 	CFDictionaryRef attrs = CFDictionaryCreate(kCFAllocatorDefault, keys, values, 2,
 						   &kCFTypeDictionaryKeyCallBacks,
 						   &kCFTypeDictionaryValueCallBacks);
@@ -201,8 +210,20 @@ bool render_text_layer(const TextRenderRequest &req, TextRenderResult &out)
 	const double line_width = CTLineGetTypographicBounds(line, &ascent, &descent, &leading);
 
 	// Bitmap size: the PSD layer rectangle when given, otherwise the text box.
-	int w = req.width > 0 ? req.width : int(std::ceil(line_width)) + 4;
-	int h = req.height > 0 ? req.height : int(std::ceil(ascent + descent + leading)) + 4;
+	// A stroke effect paints outside the glyphs, so the bitmap grows by the
+	// stroke width; the caller blits it back at (left - pad, top - pad).
+	// The PSD stores the stroke size relative to the layer's point size (100pt in
+	// the sample files); scale it by the size we actually render at.
+	double stroke_px = 0;
+	if (req.stroke && req.stroke_width > 0) {
+		const double ref = req.font_size > 0 ? req.font_size : 100.0;
+		stroke_px = req.stroke_width * (size / ref);
+		if (stroke_px < 1.0)
+			stroke_px = 1.0;
+	}
+	const int pad = stroke_px > 0 ? int(std::ceil(stroke_px)) + 1 : 0;
+	int w = (req.width > 0 ? req.width : int(std::ceil(line_width)) + 4) + pad * 2;
+	int h = (req.height > 0 ? req.height : int(std::ceil(ascent + descent + leading)) + 4) + pad * 2;
 	w = std::max(w, 1);
 	h = std::max(h, 1);
 	if (size_t(w) * size_t(h) > 64u * 1024u * 1024u) {
@@ -242,15 +263,17 @@ bool render_text_layer(const TextRenderRequest &req, TextRenderResult &out)
 
 	// Baseline placement. PSD text sits on the layer rectangle with a small top
 	// inset; centre it vertically inside the requested height.
-	double pen_x = 0;
+	double pen_x = double(pad);
 	if (req.width > 0) {
 		if (req.justification == 2)
-			pen_x = (double(w) - line_width) * 0.5;
+			pen_x = double(pad) + (double(req.width) - line_width) * 0.5;
 		else if (req.justification == 1)
-			pen_x = double(w) - line_width;
+			pen_x = double(pad) + double(req.width) - line_width;
 	}
-	const double baseline_y = req.height > 0 ? (double(h) - (double(ascent) + double(descent))) * 0.5 + double(descent)
-						 : 2.0 + double(descent);
+	const double baseline_y = req.height > 0
+					  ? double(pad) + (double(req.height) - (double(ascent) + double(descent))) * 0.5 +
+						    double(descent)
+					  : double(pad) + 2.0 + double(descent);
 
 	CGContextSetTextMatrix(ctx, CGAffineTransformIdentity);
 	CGContextSetTextPosition(ctx, CGFloat(pen_x), CGFloat(baseline_y));
@@ -263,7 +286,6 @@ bool render_text_layer(const TextRenderRequest &req, TextRenderResult &out)
 	CFRelease(text);
 	CFRelease(color);
 	CFRelease(font);
-
 	// CoreGraphics produced premultiplied RGBA; convert to straight alpha.
 	const uint8_t *src = static_cast<const uint8_t *>(buffer);
 	out.rgba.assign(size_t(w) * size_t(h) * 4, 0);
@@ -286,8 +308,79 @@ bool render_text_layer(const TextRenderRequest &req, TextRenderResult &out)
 	if (!any)
 		return false;
 
+	// Stroke (PSD "Stroke" layer effect, outside): dilate the alpha mask by
+	// `stroke_width` pixels and composite the fill on top of it. Doing this
+	// ourselves beats CoreText's percentage-based stroke because the PSD stores
+	// the width in pixels.
+	if (stroke_px >= 1.0) {
+		const int radius = int(stroke_px + 0.5);
+		std::vector<uint8_t> mask(size_t(w) * size_t(h));
+		for (size_t i = 0; i < mask.size(); ++i)
+			mask[i] = out.rgba[i * 4 + 3];
+
+		// Separable dilation: horizontal pass then vertical pass, which is
+		// O(w*h*radius) instead of O(w*h*radius^2).
+		std::vector<uint8_t> tmp(mask.size(), 0);
+		for (int y = 0; y < h; ++y) {
+			const uint8_t *row = &mask[size_t(y) * size_t(w)];
+			uint8_t *dst_row = &tmp[size_t(y) * size_t(w)];
+			for (int x = 0; x < w; ++x) {
+				uint8_t best = 0;
+				const int lo = std::max(0, x - radius);
+				const int hi = std::min(w - 1, x + radius);
+				for (int k = lo; k <= hi; ++k)
+					best = std::max(best, row[k]);
+				dst_row[x] = best;
+			}
+		}
+		std::vector<uint8_t> dilated(mask.size(), 0);
+		for (int x = 0; x < w; ++x) {
+			for (int y = 0; y < h; ++y) {
+				uint8_t best = 0;
+				const int lo = std::max(0, y - radius);
+				const int hi = std::min(h - 1, y + radius);
+				for (int k = lo; k <= hi; ++k)
+					best = std::max(best, tmp[size_t(k) * size_t(w) + size_t(x)]);
+				dilated[size_t(y) * size_t(w) + size_t(x)] = best;
+			}
+		}
+
+		const uint8_t sc[4] = {uint8_t(std::max(0.0, std::min(1.0, req.stroke_color[0])) * 255.0),
+				       uint8_t(std::max(0.0, std::min(1.0, req.stroke_color[1])) * 255.0),
+				       uint8_t(std::max(0.0, std::min(1.0, req.stroke_color[2])) * 255.0),
+				       uint8_t(std::max(0.0, std::min(1.0, req.stroke_color[3] <= 0.0 ? 1.0
+										   : req.stroke_color[3])) *
+					       255.0)};
+		std::vector<uint8_t> merged(out.rgba.size(), 0);
+		for (size_t i = 0; i < mask.size(); ++i) {
+			const unsigned sa = dilated[i];
+			const unsigned fa = out.rgba[i * 4 + 3];
+			// Stroke first, then the filled glyph over it (both straight alpha).
+			unsigned ar = sa * sc[3] / 255u;
+			unsigned ag = sa * sc[3] / 255u;
+			unsigned ab = sa * sc[3] / 255u;
+			unsigned aa = sa * sc[3] / 255u;
+			unsigned br = out.rgba[i * 4 + 0];
+			unsigned bg = out.rgba[i * 4 + 1];
+			unsigned bb = out.rgba[i * 4 + 2];
+			unsigned ba = fa;
+			const unsigned out_a = ba + aa - (ba * aa + 127u) / 255u;
+			if (out_a == 0)
+				continue;
+			auto over = [&](unsigned bc, unsigned ac) {
+				return (bc * ba + (ac * aa * 255u + 127u) / 255u * (255u - ba) / 255u + 127u) / out_a;
+			};
+			merged[i * 4 + 0] = uint8_t(std::min(255u, over(br, sc[0])));
+			merged[i * 4 + 1] = uint8_t(std::min(255u, over(bg, sc[1])));
+			merged[i * 4 + 2] = uint8_t(std::min(255u, over(bb, sc[2])));
+			merged[i * 4 + 3] = uint8_t(out_a);
+		}
+		out.rgba.swap(merged);
+	}
+
 	out.width = w;
 	out.height = h;
+	out.pad = pad;
 	out.used_font = chosen;
 	out.font_substituted = substituted;
 	return true;

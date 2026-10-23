@@ -78,6 +78,11 @@ struct Layer {
     double text_size = 0;
     double text_color[4] = {0, 0, 0, 1};
 
+    // Layer effects (lfx2) that matter for rendering a type layer.
+    bool stroke_on = false;
+    double stroke_size = 0;                // px, relative to text_size points
+    double stroke_color[4] = {1, 1, 1, 1}; // RGBA 0..1
+
     // Read-only annotations derived from PSD section dividers (see above).
     // The writer ignores these.
     std::string group_name;

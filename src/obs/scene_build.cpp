@@ -328,6 +328,12 @@ void apply_blending(obs_sceneitem_t *item, const psd::Layer &layer)
 struct BuildState {
 	std::vector<obs_source_t *> images; // every image source we created (refs held)
 	std::string err;
+	// Text styling, taken from SceneBuildOptions when the user set it.
+	bool text_style_valid = false;
+	double text_color[4] = {0.8, 0.6, 0.8, 1.0};
+	bool text_stroke = true;
+	double text_stroke_width = 16.0;
+	double text_stroke_color[4] = {1, 1, 1, 1};
 };
 
 // Renders a PSD type layer with CoreText and imports the bitmap as an image
@@ -340,10 +346,14 @@ obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double
 	req.font = layer.text_font;
 	req.font_size = layer.text_size;
 	for (int i = 0; i < 4; ++i)
-		req.color[i] = layer.text_color[i];
+		req.color[i] = st.text_style_valid ? st.text_color[i] : layer.text_color[i];
 	req.justification = 0;
 	req.width = layer.width();
 	req.height = layer.height();
+	req.stroke = st.text_style_valid ? st.text_stroke : layer.stroke_on;
+	req.stroke_width = st.text_style_valid ? st.text_stroke_width : layer.stroke_size;
+	for (int i = 0; i < 4; ++i)
+		req.stroke_color[i] = st.text_style_valid ? st.text_stroke_color[i] : layer.stroke_color[i];
 
 	psd::TextRenderResult res;
 	if (!psd::render_text_layer(req, res)) {
@@ -608,6 +618,13 @@ bool build_scene_from_psd(const psd::Document &doc, const char *scene_name, std:
 	}
 
 	BuildState st;
+	st.text_style_valid = options.text_style_valid;
+	for (int i = 0; i < 4; ++i) {
+		st.text_color[i] = options.text_color[i];
+		st.text_stroke_color[i] = options.text_stroke_color[i];
+	}
+	st.text_stroke = options.text_stroke;
+	st.text_stroke_width = options.text_stroke_width;
 	const Placement p = compute_placement(doc, options.placement);
 
 	// Public scene (NOT private): obs_scene_create() inserts the scene source into

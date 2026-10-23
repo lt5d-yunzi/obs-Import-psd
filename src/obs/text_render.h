@@ -25,12 +25,17 @@ struct TextRenderRequest {
 	int justification = 0; // 0 left, 1 right, 2 centre
 	int width = 0;         // target bitmap width in px (0 = fit the text)
 	int height = 0;        // target bitmap height in px (0 = fit the text)
+	// Optional stroke (PSD layer effect "Stroke"): outside the glyph outline.
+	bool stroke = false;
+	double stroke_width = 0;            // px
+	double stroke_color[4] = {1, 1, 1, 1}; // RGBA 0..1
 };
 
 struct TextRenderResult {
 	std::vector<uint8_t> rgba; // width*height*4, straight alpha
 	int width = 0;
 	int height = 0;
+	int pad = 0;           // bitmap extends `pad` px past the layer rect on each side
 	std::string used_font;     // PostScript name actually used
 	bool font_substituted = false;
 };

@@ -180,10 +180,18 @@ std::string read_key(Cursor &c)
 }
 
 // Reads the first `<<key value>>` colour dictionary and returns its 4 values.
+// The key and dictionary are separated by length bytes that are not whitespace,
+// so skip forward to the first "<<" before parsing.
 bool read_color_values(Cursor &c, double out[4])
 {
-	if (!c.accept("<<"))
-		return false;
+	c.skip_space();
+	for (int skip = 0; skip < 64 && size_t(c.end - c.p) >= 2; ++skip) {
+		if (c.p[0] == '<' && c.p[1] == '<') {
+			c.p += 2;
+			break;
+		}
+		++c.p;
+	}
 	int got = 0;
 	const uint8_t *limit = c.end;
 	for (int guard = 0; guard < 64 && !c.eof() && c.p < limit; ++guard) {
@@ -274,12 +282,18 @@ bool parse_engine_data(const uint8_t *data, size_t size, TextStyle &out)
 		if (c.accept("<<") || c.accept(">>") || c.accept("]") || c.accept("["))
 			continue;
 		if (c.peek() != '/') {
+			// Unknown filler byte between structural tokens (EngineData pads
+			// some containers): step over it and keep walking.
+			if (c.peek() < 0x20 || c.peek() > 0x7E) {
+				++c.p;
+				continue;
+			}
 			if (!skip_value(c, 0))
 				break;
 			continue;
 		}
 		const std::string key = read_key(c);
-		if (key == "Text") {
+		if (key == "Text" && !have_text) {
 			c.skip_space();
 			if (c.peek() == '(') {
 				++c.p;
@@ -297,7 +311,7 @@ bool parse_engine_data(const uint8_t *data, size_t size, TextStyle &out)
 		}
 		if (key == "FontSize") {
 			double v = 0;
-			if (read_number(c, v))
+			if (read_number(c, v) && out.font_size <= 0)
 				out.font_size = v;
 			continue;
 		}
@@ -309,14 +323,24 @@ bool parse_engine_data(const uint8_t *data, size_t size, TextStyle &out)
 		}
 		if (key == "FillColor") {
 			double v[4] = {0, 0, 0, 1};
-			if (read_color_values(c, v))
-				for (int i = 0; i < 4; ++i)
-					out.color[i] = v[i];
+			if (read_color_values(c, v)) {
+				// Photoshop stores text fill colour as [alpha, R, G, B].
+				out.color[0] = v[1];
+				out.color[1] = v[2];
+				out.color[2] = v[3];
+				out.color[3] = v[0] <= 0.0 ? 1.0 : v[0];
+			}
 			continue;
 		}
 		if (key == "FontSet") {
 			if (font.empty())
 				font = read_first_font(c);
+			continue;
+		}
+		// Containers are walked through rather than skipped so nested keys such
+		// as /Text and /FillColor are still seen; only scalar values are skipped.
+		c.skip_space();
+		if (c.accept("<<") || c.accept("[")) {
 			continue;
 		}
 		if (!skip_value(c, 0))
@@ -391,7 +415,10 @@ bool parse_engine_data(const uint8_t *data, size_t size, TextStyle &out)
 						if (w.accept("<<")) {
 							if (read_color_values(w, v)) {
 								for (int i = 0; i < 4; ++i)
-									out.color[i] = v[i];
+									out.color[0] = v[1];
+									out.color[1] = v[2];
+									out.color[2] = v[3];
+									out.color[3] = v[0] <= 0.0 ? 1.0 : v[0];
 								color_ok = true;
 							}
 							break;

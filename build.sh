@@ -35,6 +35,7 @@ SOURCES=(
   src/psd/psd_buf.cpp
   src/psd/rle.cpp
   src/psd/psd_text.cpp
+  src/psd/psd_descriptor.cpp
   third_party/miniz/miniz.c
   third_party/miniz/miniz_tdef.c
   third_party/miniz/miniz_tinfl.c

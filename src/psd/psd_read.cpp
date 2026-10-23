@@ -18,6 +18,7 @@
 #include "psd.h"
 
 #include "impl/psd_common.h"
+#include "psd_descriptor.h"
 #include "psd_text.h"
 
 #include "miniz.h"
@@ -670,6 +671,37 @@ bool parse_layers(const uint8_t *buf, size_t buf_len, int color_mode, uint64_t m
                             std::string uname;
                             detail::utf16_to_utf8(units.data(), units.size(), uname);
                             L.name = std::move(uname);
+                        }
+                    }
+                } else if (std::memcmp(bkey, "lfx2", 4) == 0 && blen >= 16) {
+                    // Layer effects: we only need an enabled Stroke.
+                    Descriptor fx;
+                    if (parse_descriptor(extra + bstart, size_t(blen), 0, fx)) {
+                        const Descriptor *stroke = fx.get("FrFX");
+                        if (stroke != nullptr && stroke->kind == Descriptor::Kind::Object) {
+                            const Descriptor *enab = stroke->get("enabb");
+                            const bool on = enab != nullptr && enab->as_bool(false);
+                            if (on) {
+                                L.stroke_on = true;
+                                const Descriptor *sz = stroke->get("Sz  ");
+                                if (sz != nullptr)
+                                    L.stroke_size = sz->as_number(0.0);
+                                const Descriptor *clr = stroke->get("Clr ");
+                                if (clr != nullptr && clr->kind == Descriptor::Kind::Object) {
+                                    const Descriptor *rgb = clr->get("RGBC");
+                                    if (rgb != nullptr) {
+                                        const Descriptor *rd = rgb->get("Rd  ");
+                                        const Descriptor *gn = rgb->get("Grn ");
+                                        const Descriptor *bl = rgb->get("Bl  ");
+                                        if (rd && gn && bl) {
+                                            L.stroke_color[0] = std::max(0.0, std::min(1.0, rd->as_number(0.0) / 255.0));
+                                            L.stroke_color[1] = std::max(0.0, std::min(1.0, gn->as_number(0.0) / 255.0));
+                                            L.stroke_color[2] = std::max(0.0, std::min(1.0, bl->as_number(0.0) / 255.0));
+                                            L.stroke_color[3] = 1.0;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 } else if (std::memcmp(bkey, "TySh", 4) == 0 && blen >= 54) {

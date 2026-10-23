@@ -18,9 +18,13 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QColorDialog>
 #include <QStandardPaths>
 #include <QStringList>
 #include <QTextEdit>
+#include <QCheckBox>
+#include <QSpinBox>
+#include <QPushButton>
 #include <QVBoxLayout>
 #include <cstdlib>
 
@@ -80,6 +84,68 @@ void run_import_dialog()
     auto *name_edit = new QLineEdit(QFileInfo(path).completeBaseName(), &dlg);
     form->addRow(QObject::tr("Scene name"), name_edit);
 
+    // Text layers: colour and stroke. PSD keeps these inside nested binary
+    // formats that are not fully decoded yet, so expose them here.
+    int text_layers = 0;
+    for (const auto &l : doc.layers)
+        if (!l.text.empty())
+            ++text_layers;
+
+    QColor text_color(204, 153, 204);
+    QColor stroke_color(255, 255, 255);
+    double stroke_width = 16.0;
+    bool stroke_on = true;
+
+    auto *text_group = new QGroupBox(QObject::tr("Text layers (%1 found)").arg(text_layers), &dlg);
+    auto *text_form = new QFormLayout(text_group);
+
+    auto *color_button = new QPushButton(text_group);
+    auto set_button_color = [color_button](const QColor &c) {
+        color_button->setText(c.name(QColor::HexRgb).toUpper());
+        color_button->setStyleSheet(QString("background-color: %1; color: %2;")
+                                        .arg(c.name())
+                                        .arg(c.lightness() > 128 ? "black" : "white"));
+    };
+    set_button_color(text_color);
+    QObject::connect(color_button, &QPushButton::clicked, &dlg, [&, color_button]() {
+        const QColor picked = QColorDialog::getColor(text_color, &dlg, QObject::tr("Text colour"));
+        if (picked.isValid()) {
+            text_color = picked;
+            set_button_color(text_color);
+        }
+    });
+    text_form->addRow(QObject::tr("Fill colour"), color_button);
+
+    auto *stroke_check = new QCheckBox(QObject::tr("White stroke"), text_group);
+    stroke_check->setChecked(stroke_on);
+    text_form->addRow(QString(), stroke_check);
+
+    auto *stroke_spin = new QSpinBox(text_group);
+    stroke_spin->setRange(0, 64);
+    stroke_spin->setValue(int(stroke_width));
+    stroke_spin->setSuffix(" px");
+    text_form->addRow(QObject::tr("Stroke width"), stroke_spin);
+
+    auto *stroke_color_button = new QPushButton(text_group);
+    auto set_stroke_button_color = [stroke_color_button](const QColor &c) {
+        stroke_color_button->setText(c.name(QColor::HexRgb).toUpper());
+        stroke_color_button->setStyleSheet(QString("background-color: %1; color: %2;")
+                                               .arg(c.name())
+                                               .arg(c.lightness() > 128 ? "black" : "white"));
+    };
+    set_stroke_button_color(stroke_color);
+    QObject::connect(stroke_color_button, &QPushButton::clicked, &dlg, [&, stroke_color_button]() {
+        const QColor picked = QColorDialog::getColor(stroke_color, &dlg, QObject::tr("Stroke colour"));
+        if (picked.isValid()) {
+            stroke_color = picked;
+            set_stroke_button_color(stroke_color);
+        }
+    });
+    text_form->addRow(QObject::tr("Stroke colour"), stroke_color_button);
+
+    if (text_layers > 0)
+        layout->addWidget(text_group);
+
     layout->addLayout(form);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
@@ -92,6 +158,19 @@ void run_import_dialog()
 
     SceneBuildOptions opts;
     opts.placement = SceneBuildOptions::Place_FitCanvas;
+    if (text_layers > 0) {
+        opts.text_style_valid = true;
+        opts.text_color[0] = text_color.redF();
+        opts.text_color[1] = text_color.greenF();
+        opts.text_color[2] = text_color.blueF();
+        opts.text_color[3] = 1.0;
+        opts.text_stroke = stroke_check->isChecked();
+        opts.text_stroke_width = double(stroke_spin->value());
+        opts.text_stroke_color[0] = stroke_color.redF();
+        opts.text_stroke_color[1] = stroke_color.greenF();
+        opts.text_stroke_color[2] = stroke_color.blueF();
+        opts.text_stroke_color[3] = 1.0;
+    }
     std::string build_err;
     obs_source_t *scene_src = nullptr;
     if (!build_scene_from_psd(doc, name_edit->text().toStdString().c_str(), build_err, &scene_src, opts)) {

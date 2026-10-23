@@ -27,6 +27,16 @@ struct SceneBuildOptions {
 
 	Placement placement = Place_FitCanvas;
 
+	// Text layer styling. PSD stores the exact fill colour and stroke inside
+	// two nested binary formats (EngineData and the lfx2 descriptor) that the
+	// reader does not fully decode yet, so the import dialog lets the user set
+	// them explicitly. `text_style_valid` false means "use the reader's values".
+	bool text_style_valid = false;
+	double text_color[4] = {0.8, 0.6, 0.8, 1.0};   // RGBA 0..1
+	bool text_stroke = true;
+	double text_stroke_width = 16.0;              // px at 100pt
+	double text_stroke_color[4] = {1, 1, 1, 1};
+
 	// Milliseconds to wait for image_source textures to load before the scene
 	// is declared usable.  0 = do not wait (caller then owns the wait via
 	// wait_scene_images_loaded()).
