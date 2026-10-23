@@ -421,7 +421,7 @@ obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double
 	obs_data_set_string(settings, "file", path.c_str());
 	obs_data_set_bool(settings, "unload", false);
 	obs_data_set_bool(settings, "linear_alpha", false);
-	obs_source_t *src = obs_source_create_private("image_source", layer.name.c_str(), settings);
+	obs_source_t *src = obs_source_create("image_source", layer.name.c_str(), settings, nullptr);
 	obs_data_release(settings);
 	if (!src) {
 		st.err = "could not create image_source for rendered text layer '" + layer.name + "'";
@@ -443,7 +443,7 @@ obs_source_t *create_layer_source(BuildState &st, const psd::Layer &layer, int c
 	obs_data_set_bool(settings, "unload", false); // keep the texture alive while hidden
 	obs_data_set_bool(settings, "linear_alpha", false);
 
-	obs_source_t *src = obs_source_create_private("image_source", layer.name.c_str(), settings);
+	obs_source_t *src = obs_source_create("image_source", layer.name.c_str(), settings, nullptr);
 	obs_data_release(settings);
 
 	if (!src) {
