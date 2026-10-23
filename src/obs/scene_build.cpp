@@ -301,29 +301,75 @@ bool is_group(const psd::Layer &l)
 }
 
 // Adds one layer to `parent` (the root scene or a group's inner scene).
-bool add_layer(BuildState &st, obs_scene_t *parent, const psd::Layer &layer, const Placement &p)
+// Text layers and vector shape layers carry no pixel data in a PSD: Photoshop
+// renders them on the fly. Cut the layer's rectangle out of the flattened
+// composite so the user sees the artwork instead of an empty layer.
+bool crop_from_composite(const psd::Document &doc, const psd::Layer &layer, std::vector<uint8_t> &out)
 {
-	if (layer.empty() || layer.rgba.empty()) {
-		blog(LOG_INFO, "[obs-psd] layer '%s' has no pixels, skipped", layer.name.c_str());
-		return true;
+	if (!doc.has_composite() || layer.empty() || doc.width <= 0 || doc.height <= 0)
+		return false;
+	const int32_t lw = layer.width(), lh = layer.height();
+	out.assign(size_t(lw) * size_t(lh) * 4, 0);
+	bool any = false;
+	for (int32_t y = 0; y < lh; ++y) {
+		const int32_t sy = layer.top + y;
+		if (sy < 0 || sy >= doc.height)
+			continue;
+		for (int32_t x = 0; x < lw; ++x) {
+			const int32_t sx = layer.left + x;
+			if (sx < 0 || sx >= doc.width)
+				continue;
+			const uint8_t *s = &doc.composite[(size_t(sy) * size_t(doc.width) + size_t(sx)) * 4];
+			uint8_t *d = &out[(size_t(y) * size_t(lw) + size_t(x)) * 4];
+			d[0] = s[0];
+			d[1] = s[1];
+			d[2] = s[2];
+			d[3] = s[3];
+			if (s[3] != 0)
+				any = true;
+		}
 	}
-	if (layer.clipped)
-		blog(LOG_WARNING, "[obs-psd] layer '%s' uses a clipping mask; imported as a plain layer",
-		     layer.name.c_str());
+	return any;
+}
 
-	obs_source_t *src = create_layer_source(st, layer);
+// Adds one layer to `parent` (the root scene or a group's inner scene).
+bool add_layer(BuildState &st, obs_scene_t *parent, const psd::Layer &layer, const Placement &p,
+	       const psd::Document *doc)
+{
+	psd::Layer substituted;
+	const psd::Layer *use = &layer;
+	if (layer.empty() || layer.rgba.empty()) {
+		// No channel data: a text or vector-shape layer (Photoshop renders those
+		// on the fly). Fall back to the flattened composite so the artwork is
+		// still visible instead of an empty layer.
+		if (doc && crop_from_composite(*doc, layer, substituted.rgba)) {
+			substituted = layer;
+			crop_from_composite(*doc, layer, substituted.rgba);
+			use = &substituted;
+			blog(LOG_INFO, "[obs-psd] layer '%s' has no pixel data; cropped from the composite",
+			     layer.name.c_str());
+		} else {
+			blog(LOG_INFO, "[obs-psd] layer '%s' has no pixels, skipped", layer.name.c_str());
+			return true;
+		}
+	}
+	if (use->clipped)
+		blog(LOG_WARNING, "[obs-psd] layer '%s' uses a clipping mask; imported as a plain layer",
+		     use->name.c_str());
+
+	obs_source_t *src = create_layer_source(st, *use);
 	if (!src)
 		return false;
 
 	obs_sceneitem_t *item = obs_scene_add(parent, src);
 	if (!item) {
-		st.err = "obs_scene_add failed for layer '" + layer.name + "'";
+		st.err = "obs_scene_add failed for layer '" + use->name + "'";
 		return false;
 	}
 
-	place_item(item, layer, p);
-	apply_blending(item, layer);
-	obs_sceneitem_set_visible(item, layer.visible);
+	place_item(item, *use, p);
+	apply_blending(item, *use);
+	obs_sceneitem_set_visible(item, use->visible);
 	return true;
 }
 
@@ -357,7 +403,7 @@ bool add_group(BuildState &st, obs_scene_t *parent, const psd::Document &doc, si
 			any_visible = any_visible || sub_visible;
 			i = sub_end;
 		} else {
-			if (!add_layer(st, inner, doc.layers[i], p))
+			if (!add_layer(st, inner, doc.layers[i], p, &doc))
 				return false;
 			any_visible = any_visible || (doc.layers[i].visible && !doc.layers[i].empty());
 			++i;
@@ -442,7 +488,7 @@ bool build_scene_from_psd(const psd::Document &doc, const char *scene_name, std:
 			}
 			i = end;
 		} else {
-			if (!add_layer(st, scene, doc.layers[i], p)) {
+			if (!add_layer(st, scene, doc.layers[i], p, &doc)) {
 				ok = false;
 				break;
 			}

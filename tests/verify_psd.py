@@ -248,14 +248,17 @@ def parse(path):
     comp = r.u16()
     if comp != 1:
         raise ParseError("composite compression is %d, expected RLE" % comp)
+    # The composite stores ONE compression tag, then the row-count table of
+    # every plane, then the packed rows of every plane.
     planes = []
+    h = res["height"]
+    w = res["width"]
+    all_counts = [r.u16() for _ in range(h * 3)]
+    packed = r.raw(sum(all_counts))
+    off = 0
     for c in range(3):
-        h = res["height"]
-        w = res["width"]
-        counts = [r.u16() for _ in range(h)]
-        packed = r.raw(sum(counts))
+        counts = all_counts[c * h:(c + 1) * h]
         plane = bytearray()
-        off = 0
         for c2 in counts:
             plane += decode_packbits(packed[off:off + c2], w)
             off += c2

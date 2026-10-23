@@ -552,21 +552,26 @@ bool serialize_to(detail::ByteBuf &out, const Document &doc, std::string &error)
     // (h * 2-byte row counts + the packed rows) with no per-plane tag.
     w.u16(1); // compression: RLE
     std::vector<uint8_t> plane(size_t(W) * size_t(H));
+    // PSD stores ONE compression tag, then the row-count table of every plane,
+    // then the packed rows of every plane.
+    std::vector<std::vector<std::vector<uint8_t>>> comp_planes(3);
     for (size_t c = 0; c < 3; ++c) {
         for (size_t i = 0; i < plane.size(); ++i) {
             // The flattened preview has no alpha plane, so colour is stored as-is
             // (premultiplying here would darken it by the source alpha).
             plane[i] = flat[i * 4 + size_t(c)];
         }
-        if (!encode_plane_rows(plane, W, H, rows, error)) {
+        if (!encode_plane_rows(plane, W, H, comp_planes[c], error)) {
             error = "composite row too long for PSD";
             return false;
         }
-        for (const std::vector<uint8_t> &row : rows)
-            w.u16(uint16_t(row.size()));
-        for (const std::vector<uint8_t> &row : rows)
-            w.bytes(row.data(), row.size());
     }
+    for (size_t c = 0; c < 3; ++c)
+        for (const std::vector<uint8_t> &row : comp_planes[c])
+            w.u16(uint16_t(row.size()));
+    for (size_t c = 0; c < 3; ++c)
+        for (const std::vector<uint8_t> &row : comp_planes[c])
+            w.bytes(row.data(), row.size());
 
     if (w.buf.overflowed()) {
         error = "document too large for one write";

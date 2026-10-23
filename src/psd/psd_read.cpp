@@ -379,31 +379,15 @@ bool decode_plane_standalone(const uint8_t *body, size_t body_len, int64_t w, in
     return pr == PlaneResult::Ok;
 }
 
-// Decodes one RLE plane body WITHOUT a leading compression tag: h 16-bit row
-// byte counts followed by the concatenated PackBits rows. Used by the flattened
-// composite, whose single compression tag is stored once for all planes.
-PlaneResult read_rle_rows(detail::Reader &r, int64_t w, int64_t h, uint64_t max_pixels, Plane &out, std::string &err)
+// Decodes one RLE plane body when the row-count table was already consumed
+// (PSD's flattened composite stores one table for all planes).
+PlaneResult read_rle_rows_nocounts(detail::Reader &r, int64_t w, int64_t h, const std::vector<uint32_t> &counts,
+                                   Plane &out, std::string &err)
 {
     const uint64_t n = uint64_t(w) * uint64_t(h);
-    if (n > max_pixels) {
-        err = "document too large";
-        return PlaneResult::Error;
-    }
-    if (uint64_t(h) > uint64_t(r.remaining()) / 2u) {
-        err = "truncated RLE row counts";
-        return PlaneResult::Error;
-    }
-    std::vector<uint32_t> counts(static_cast<size_t>(h));
     uint64_t total = 0;
-    for (int64_t y = 0; y < h; ++y) {
-        uint16_t c = 0;
-        if (!detail::rd_u16(r, c)) {
-            err = "truncated RLE row counts";
-            return PlaneResult::Error;
-        }
-        counts[size_t(y)] = c;
-        total += c;
-    }
+    for (size_t i = 0; i < counts.size(); ++i)
+        total += counts[i];
     if (total > uint64_t(r.remaining())) {
         err = "truncated RLE rows";
         return PlaneResult::Error;
@@ -419,7 +403,7 @@ PlaneResult read_rle_rows(detail::Reader &r, int64_t w, int64_t h, uint64_t max_
         return PlaneResult::Error;
     }
     size_t off = 0, produced = 0;
-    for (int64_t y = 0; y < h; ++y) {
+    for (int64_t y = 0; y < h && size_t(y) < counts.size(); ++y) {
         std::vector<uint8_t> row;
         rle_decode(packed + off, counts[size_t(y)], size_t(w), row);
         off += counts[size_t(y)];
@@ -971,6 +955,7 @@ bool read_composite(const uint8_t *data, size_t size, size_t start, int64_t w, i
     // Decode exactly max(ri,gi,bi,ai)+1 planes; planes_to_rgba() reports a
     // missing alpha as opaque (255). Anything after that is not read.
     (void)channels;
+    std::vector<uint32_t> composite_counts;
     std::unique_ptr<Plane[]> planes(new (std::nothrow) Plane[static_cast<size_t>(maxc)]);
     if (!planes) {
         err = "out of memory";
@@ -997,8 +982,32 @@ bool read_composite(const uint8_t *data, size_t size, size_t start, int64_t w, i
                 std::memcpy(planes[size_t(c)].get(), p, size_t(plane_bytes));
         } else {
             // RLE composite: the 2-byte compression tag is stored ONCE for the
-            // whole image, so each plane here is only (h row counts + rows).
-            const PlaneResult pr = read_rle_rows(cr, w, h, max_pixels, planes[size_t(c)], err);
+            // whole image, followed by the row-count table of ALL planes
+            // (h x channels entries) and only then the packed rows.
+            std::vector<uint32_t> counts;
+            if (c == 0) {
+                if (uint64_t(h) * uint64_t(maxc) > uint64_t(cr.remaining()) / 2u) {
+                    err = "truncated composite row counts";
+                    return false;
+                }
+                counts.resize(size_t(h) * size_t(maxc));
+                for (size_t k = 0; k < counts.size(); ++k) {
+                    uint16_t v = 0;
+                    if (!detail::rd_u16(cr, v)) {
+                        err = "truncated composite row counts";
+                        return false;
+                    }
+                    counts[k] = v;
+                }
+                composite_counts = std::move(counts);
+            }
+            if (composite_counts.size() != size_t(h) * size_t(maxc)) {
+                err = "composite row count table mismatch";
+                return false;
+            }
+            std::vector<uint32_t> mine(composite_counts.begin() + ptrdiff_t(size_t(c) * size_t(h)),
+                                       composite_counts.begin() + ptrdiff_t(size_t(c + 1) * size_t(h)));
+            const PlaneResult pr = read_rle_rows_nocounts(cr, w, h, mine, planes[size_t(c)], err);
             if (pr == PlaneResult::Error)
                 return false;
         }
