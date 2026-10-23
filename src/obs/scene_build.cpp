@@ -92,6 +92,7 @@
 // =============================================================================
 
 #include "scene_build.h"
+#include "obs/text_render.h"
 
 #include <obs.h>
 #include <obs-frontend-api.h>
@@ -272,29 +273,60 @@ struct BuildState {
 	std::string err;
 };
 
-// Builds an OBS text source for a PSD type layer. The text, font and size come
-// from the PSD's TySh block, so the result is real editable text rather than a
-// screenshot of the flattened composite.
+// Renders a PSD type layer with CoreText and imports the bitmap as an image
+// source. A text source would show missing-glyph boxes whenever the PSD's font
+// is absent (common), so rendering gives a faithful, font-independent picture.
 obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double fit)
 {
-	obs_data_t *settings = obs_data_create();
-	obs_data_set_string(settings, "text", layer.text.c_str());
-	obs_data_set_string(settings, "font", layer.text_font.empty() ? "Sans Serif" : layer.text_font.c_str());
-	// PSD stores the size in points; scale it to document pixels.
-	const double px = layer.text_size > 0 ? layer.text_size * fit : 48.0 * fit;
-	obs_data_set_int(settings, "font_size", (long long)(px > 1 ? px : 1));
-	obs_data_set_int(settings, "color1", 0xFFFFFFFF);
-	obs_data_set_int(settings, "color2", 0xFFFFFFFF);
-	obs_data_set_bool(settings, "outline", false);
-	obs_data_set_bool(settings, "drop_shadow", false);
-	obs_data_set_int(settings, "align", OBS_ALIGN_LEFT);
-	obs_data_set_bool(settings, "word_wrap", false);
-	obs_data_set_int(settings, "custom_width", layer.width() > 0 ? layer.width() : 0);
+	psd::TextRenderRequest req;
+	req.text = layer.text;
+	req.font = layer.text_font;
+	req.font_size = layer.text_size;
+	for (int i = 0; i < 4; ++i)
+		req.color[i] = layer.text_color[i];
+	req.justification = 0;
+	req.width = layer.width();
+	req.height = layer.height();
 
-	obs_source_t *src = obs_source_create_private("text_ft2_source_v2", layer.name.c_str(), settings);
+	psd::TextRenderResult res;
+	if (!psd::render_text_layer(req, res)) {
+		blog(LOG_WARNING, "[obs-psd] could not render text layer '%s' (text='%s', font='%s')",
+		     layer.name.c_str(), layer.text.c_str(), layer.text_font.c_str());
+		return nullptr;
+	}
+	if (res.font_substituted) {
+		blog(LOG_WARNING,
+		     "[obs-psd] text layer '%s' wants font '%s', which is missing here; rendered with '%s'",
+		     layer.name.c_str(), layer.text_font.c_str(), res.used_font.c_str());
+	} else {
+		blog(LOG_INFO, "[obs-psd] text layer '%s' rendered with font '%s'", layer.name.c_str(),
+		     res.used_font.c_str());
+	}
+
+	std::string path;
+	{
+		std::lock_guard<std::mutex> lock(g_files_mutex);
+		path = make_temp_image_path();
+	}
+	if (!stbi_write_png(path.c_str(), res.width, res.height, 4, res.rgba.data(), res.width * 4)) {
+		st.err = "could not write rendered text PNG: " + path;
+		return nullptr;
+	}
+	{
+		std::lock_guard<std::mutex> lock(g_files_mutex);
+		if (!g_kept_files)
+			g_kept_files = new std::vector<std::string>();
+		g_kept_files->push_back(path);
+	}
+
+	obs_data_t *settings = obs_data_create();
+	obs_data_set_string(settings, "file", path.c_str());
+	obs_data_set_bool(settings, "unload", false);
+	obs_data_set_bool(settings, "linear_alpha", false);
+	obs_source_t *src = obs_source_create_private("image_source", layer.name.c_str(), settings);
 	obs_data_release(settings);
 	if (!src) {
-		st.err = "could not create text_ft2_source_v2 for layer '" + layer.name + "'";
+		st.err = "could not create image_source for rendered text layer '" + layer.name + "'";
 		return nullptr;
 	}
 	st.images.push_back(src);

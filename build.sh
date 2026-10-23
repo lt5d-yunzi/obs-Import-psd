@@ -43,6 +43,7 @@ SOURCES=(
   src/obs/scene_build.cpp
   src/obs/scene_export.cpp
   src/obs/psd_ignore.cpp
+  src/obs/text_render_macos.mm
 )
 
 mkdir -p "$OUT"
@@ -56,6 +57,9 @@ clang++ "${CXX_FLAGS[@]}" \
   -o "$BUNDLE/Contents/MacOS/$NAME" \
   -bundle -undefined dynamic_lookup \
   -framework libobs \
+  -framework CoreText \
+  -framework CoreGraphics \
+  -framework CoreFoundation \
   "$FW/obs-frontend-api.dylib" \
   -Xlinker -ld_classic
 
