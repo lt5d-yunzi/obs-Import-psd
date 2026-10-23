@@ -543,7 +543,10 @@ bool parse_layers(const uint8_t *buf, size_t buf_len, int color_mode, uint64_t m
         std::vector<uint32_t> lengths;
         bool has_pixels = false;
         int64_t lw = 0, lh = 0;
+        int64_t out_index = -1; // index into `out`, or -1 for records that add no layer
     };
+    // One entry per PSD record, in file order. Every record owns its channel
+    // bytes, even when it does not add a layer (group dividers).
     std::vector<Slot> pending;
 
     for (int64_t idx = 0; idx < count; ++idx) {
@@ -762,21 +765,17 @@ bool parse_layers(const uint8_t *buf, size_t buf_len, int color_mode, uint64_t m
                     }
                 }
             }
-            // A divider is a record like any other, but it does not add a layer
-            // of its own (the "<" branch already appended the group placeholder).
-            // Channel slots are indexed by output layer, so only push one when a
-            // layer was actually appended above.
+            // A divider owns its own channel bytes (usually 4 x 2 by共 of the
+            // placeholder length, but a writer may put real data there), so it
+            // always gets a slot. The opening divider's group placeholder is
+            // bound to it; a closing divider adds no layer.
             Slot slot;
             slot.ids = ids;
             slot.lengths = lengths;
             slot.has_pixels = false;
-            if (out.size() > pending.size())
-                pending.push_back(std::move(slot));
-            else if (!lengths.empty() && slot.lengths.size() > 0) {
-                // A closing divider with channel bytes: consume nothing here; the
-                // bytes belong to this record and are skipped in the second pass
-                // only if a slot exists. Photoshop leaves them empty.
-            }
+            if (is_open_divider && !out.empty() && out.back().blend_key == "group")
+                slot.out_index = int64_t(out.size()) - 1;
+            pending.push_back(std::move(slot));
             continue;
         }
 
@@ -816,72 +815,80 @@ bool parse_layers(const uint8_t *buf, size_t buf_len, int color_mode, uint64_t m
         slot.has_pixels = has_pixels;
         slot.lw = lw;
         slot.lh = lh;
+        slot.out_index = int64_t(out.size());
         pending.push_back(std::move(slot));
         out.push_back(std::move(L));
     }
 
     // --- second pass: channel image data, in record order ------------------
-    if (pending.size() != out.size()) {
-        err = "internal: layer/channel count mismatch (pending=" + std::to_string(pending.size()) +
-              " out=" + std::to_string(out.size()) + ")";
-        return false;
-    }
+    // Every record consumes its declared bytes; only records that own a layer
+    // decode pixels. This keeps the reader in sync with files whose group
+    // dividers declare placeholder lengths.
     for (size_t i = 0; i < pending.size(); ++i) {
         Slot &slot = pending[i];
-        Layer &L = out[i];
+        uint64_t total = 0;
+        for (size_t c = 0; c < slot.lengths.size(); ++c)
+            total += slot.lengths[c];
+        if (total > uint64_t(li.remaining())) {
+            // Truncated tail: stop decoding, keep what we have.
+            break;
+        }
+        const size_t record_start = li.pos();
+        const size_t record_len = size_t(total);
+        const Layer *layer = (slot.out_index >= 0 && size_t(slot.out_index) < out.size())
+                                     ? &out[size_t(slot.out_index)]
+                                     : nullptr;
+        Layer *mutable_layer = (slot.out_index >= 0 && size_t(slot.out_index) < out.size())
+                                       ? &out[size_t(slot.out_index)]
+                                       : nullptr;
+        (void)layer;
+        if (!mutable_layer || !slot.has_pixels || slot.ids.empty()) {
+            li.skip_n(record_len);
+            continue;
+        }
         int lri = -1, lgi = -1, lbi = -1, lai = -1;
-        const bool mapped = slot.has_pixels &&
-                            map_layer_channels(slot.ids.data(), slot.ids.size(), color_mode, lri, lgi, lbi, lai);
-        size_t max_slot = 0;
-        if (mapped) {
-            max_slot = size_t(std::max(std::max(lri, lgi), std::max(lbi, lai)));
-            if (max_slot >= slot.ids.size())
-                max_slot = slot.ids.size() - 1;
+        if (!map_layer_channels(slot.ids.data(), slot.ids.size(), color_mode, lri, lgi, lbi, lai)) {
+            li.skip_n(record_len);
+            continue;
         }
-        std::unique_ptr<Plane[]> planes;
-        if (mapped) {
-            planes.reset(new (std::nothrow) Plane[max_slot + 1]);
-            if (!planes) {
-                err = "out of memory";
-                return false;
-            }
+        size_t max_slot = size_t(std::max(std::max(lri, lgi), std::max(lbi, lai)));
+        if (max_slot >= slot.ids.size())
+            max_slot = slot.ids.size() - 1;
+        std::unique_ptr<Plane[]> planes(new (std::nothrow) Plane[max_slot + 1]);
+        if (!planes) {
+            err = "out of memory";
+            return false;
         }
+        bool decode_ok = true;
+        size_t cursor = record_start;
         for (size_t c = 0; c < slot.ids.size(); ++c) {
-            const uint64_t len64 = slot.lengths[c];
-            if (len64 > uint64_t(li.remaining())) {
-                err = "truncated channel data";
-                return false;
+            const size_t body_len = size_t(slot.lengths[c]);
+            if (cursor + body_len > li.size()) {
+                decode_ok = false;
+                break;
             }
-            const size_t body_len = size_t(len64);
-            const uint8_t *body = li.ptr(body_len);
-            if (body == nullptr) {
-                err = "truncated channel data";
-                return false;
-            }
-            if (mapped && c <= max_slot) {
+            const uint8_t *body = li.base() + cursor;
+            if (c <= max_slot) {
                 std::string perr;
                 if (!decode_plane_standalone(body, body_len, slot.lw, slot.lh, planes[c], perr)) {
-                    // Keep the layer (name / bounds / visibility) but drop its
-                    // pixels rather than failing the whole document.
-                    planes.reset();
-                    for (size_t k = 0; k < slot.ids.size(); ++k)
-                        slot.lengths[k] = 0;
-                    L.rgba.clear();
-                    break;
+                    decode_ok = false;
                 }
             }
+            cursor += body_len;
         }
-        if (mapped && planes) {
-            const size_t n = size_t(slot.lw) * size_t(slot.lh);
-            const Plane rgba = planes_to_rgba(planes.get(), lri, lgi, lbi, lai, n);
-            if (rgba == nullptr) {
-                err = "out of memory";
-                return false;
-            }
-            L.rgba.assign(rgba.get(), rgba.get() + n * 4);
+        li.set_pos(record_start + record_len);
+        if (!decode_ok) {
+            mutable_layer->rgba.clear();
+            continue;
         }
+        const size_t n = size_t(slot.lw) * size_t(slot.lh);
+        const Plane rgba = planes_to_rgba(planes.get(), lri, lgi, lbi, lai, n);
+        if (rgba == nullptr) {
+            err = "out of memory";
+            return false;
+        }
+        mutable_layer->rgba.assign(rgba.get(), rgba.get() + n * 4);
     }
-
 
     // Unclosed "<" dividers: keep the name the divider itself carried.
     for (const OpenGroup &g : open) {
