@@ -53,8 +53,19 @@ struct SceneBuildOptions {
 // Threading: call from the Qt main (UI) thread or any thread while OBS is
 // running.  Frontend accessors (obs_frontend_get_scenes) must not be used
 // from the graphics thread.
+// Text layers whose PSD font is missing. The renderer already fell back to a
+// system font; the UI shows these so the user can install the real one.
+struct MissingFont {
+	std::string layer;
+	std::string wanted;  // PostScript name from the PSD
+	std::string used;    // font actually rendered with
+};
+
 bool build_scene_from_psd(const psd::Document &doc, const char *scene_name, std::string &err,
 			  obs_source_t **scene_out = nullptr, const SceneBuildOptions &options = {});
+
+// Missing fonts collected by the most recent build_scene_from_psd() call.
+std::vector<MissingFont> missing_fonts();
 
 // Waits until every image source created by build_scene_from_psd() reports a
 // non-zero size (image_source loads its PNG asynchronously on the graphics

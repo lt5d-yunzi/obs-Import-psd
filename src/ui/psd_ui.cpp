@@ -186,6 +186,31 @@ void run_import_dialog()
                       .arg(name_edit->text())
                       .arg(int(doc.layers.size()));
     QMessageBox::information(main_parent(), QObject::tr("PSD imported", "obs-psd"), msg);
+
+    // Missing PSD fonts: the text was rendered with a substitute; tell the user
+    // which font to install to get the original look back.
+    const std::vector<MissingFont> fonts = missing_fonts();
+    if (!fonts.empty()) {
+        QStringList lines;
+        std::string seen;
+        for (const MissingFont &f : fonts) {
+            if (seen.find("|" + f.wanted + "|") != std::string::npos)
+                continue;
+            seen += "|" + f.wanted + "|";
+            lines << QObject::tr("  %1  (used %2 instead)")
+                         .arg(QString::fromStdString(f.wanted))
+                         .arg(QString::fromStdString(f.used));
+        }
+        QMessageBox box(QMessageBox::Warning, QObject::tr("Missing fonts", "obs-psd"),
+                        QObject::tr("This PSD uses fonts that are not installed, so those text "
+                                    "layers were rendered with a similar system font:\n\n%1\n\n"
+                                    "Install the font(s) and re-import to match the original "
+                                    "exactly. Search the foundry or a font site for the PostScript "
+                                    "name shown above.")
+                            .arg(lines.join("\n")),
+                        QMessageBox::Ok, main_parent());
+        box.exec();
+    }
 }
 
 void run_export_dialog()

@@ -130,6 +130,7 @@ namespace {
 std::mutex g_files_mutex;
 std::vector<std::string> *g_kept_files = nullptr; // heap: no static dtor racing OBS shutdown
 std::string g_scene_image_dir;                    // where this scene's PNGs live
+std::vector<MissingFont> g_missing_fonts;        // from the most recent build
 
 // Directory that holds the PNGs of one imported scene:
 //   <user config>/obs-studio/obs-psd/<scene>/
@@ -334,6 +335,7 @@ struct BuildState {
 	bool text_stroke = true;
 	double text_stroke_width = 16.0;
 	double text_stroke_color[4] = {1, 1, 1, 1};
+	std::vector<MissingFont> missing_fonts;
 };
 
 // Renders a PSD type layer with CoreText and imports the bitmap as an image
@@ -365,6 +367,7 @@ obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double
 		blog(LOG_WARNING,
 		     "[obs-psd] text layer '%s' wants font '%s', which is missing here; rendered with '%s'",
 		     layer.name.c_str(), layer.text_font.c_str(), res.used_font.c_str());
+		st.missing_fonts.push_back(MissingFont{layer.name, layer.text_font, res.used_font});
 	} else {
 		blog(LOG_INFO, "[obs-psd] text layer '%s' rendered with font '%s'", layer.name.c_str(),
 		     res.used_font.c_str());
@@ -587,6 +590,11 @@ void keep_generated_image_files_alive()
 		g_kept_files = new std::vector<std::string>();
 }
 
+std::vector<MissingFont> missing_fonts()
+{
+	return g_missing_fonts;
+}
+
 std::vector<std::string> generated_image_files()
 {
 	std::lock_guard<std::mutex> lock(g_files_mutex);
@@ -673,6 +681,8 @@ bool build_scene_from_psd(const psd::Document &doc, const char *scene_name, std:
 			return false;
 		}
 	}
+
+	g_missing_fonts = st.missing_fonts;
 
 	// The scene items hold their own references; drop ours.
 	for (obs_source_t *s : st.images)
