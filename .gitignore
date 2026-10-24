@@ -1,6 +1,14 @@
+# Build output
 build/
 dist/
-.scratch/
 *.o
 *.dSYM/
 psd_rt.psd
+
+# Vendored third-party code: downloaded by fetch-deps.sh, never committed.
+# (Qt headers, OBS/libobs headers, simde, miniz, stb, tinyexr)
+third_party/
+
+# Scratch
+.work/
+.scratch/

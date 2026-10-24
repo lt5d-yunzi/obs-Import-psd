@@ -1,1 +1,0 @@
-/Users/yunzi/Desktop/obsplugin/obs-psd/third_party/qt-headers/src/corelib/global/qsimd_x86_p.h

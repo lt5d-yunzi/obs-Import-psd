@@ -1,1 +1,0 @@
-/Users/yunzi/Desktop/obsplugin/obs-psd/third_party/qt-headers/src/gui/platform/unix/qunixeventdispatcher_qpa_p.h

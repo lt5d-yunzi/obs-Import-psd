@@ -5,6 +5,12 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
 
+# Third-party headers are not committed (see README). Fetch them on demand.
+if [ ! -d "$HERE/third_party/obs-headers/libobs" ]; then
+  echo "third_party/ is missing; downloading dependencies..." >&2
+  "$HERE/fetch-deps.sh"
+fi
+
 OBS_APP="${OBS_APP:-/Applications/OBS.app}"
 FW="$OBS_APP/Contents/Frameworks"
 SDK="${SDK:-/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk}"

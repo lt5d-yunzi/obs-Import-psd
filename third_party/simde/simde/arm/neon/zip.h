@@ -1,1 +1,0 @@
-Package size exceeded the configured limit of 50 MB. Try https://github.com/simd-everywhere/simde/tree/v0.8.2/simde/arm/neon/zip.h instead.

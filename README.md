@@ -71,9 +71,30 @@
 
 （该目录可能受 macOS 隐私保护限制，必要时用 Finder 复制或给终端 "完全磁盘访问权限"。）
 
+### 构建
+
+```bash
+./fetch-deps.sh    # 首次构建需要：下载第三方依赖（见下）
+./build.sh         # 产物：build/obs-psd.plugin
+./tests/run_all.sh # 跑 PSD 往返 + 独立校验 + fuzz
+```
+
+`third_party/` **不包含在本仓库里**——里面全是别人的代码，各有各的许可证：
+
+| 依赖 | 来源 | 许可证 |
+|---|---|---|
+| libobs / obs-frontend-api 头文件 | [obsproject/obs-studio](https://github.com/obsproject/obs-studio) 32.2.2 | GPL-2.0-or-later |
+| Qt 头文件（QtCore/QtGui/QtWidgets） | 随 OBS.app 分发的 Qt 框架 | LGPL-3.0 |
+| simde | [simd-everywhere/simde](https://github.com/simd-everywhere/simde) 0.8.2 | MIT |
+| miniz | [richgel999/miniz](https://github.com/richgel999/miniz) 3.0.2 | MIT / public domain |
+| stb_image_write.h | [nothings/stb](https://github.com/nothings/stb) | public domain / MIT |
+
+`fetch-deps.sh` 只下载构建必需的公共头文件；`build.sh` 在 `third_party/` 缺失时会自动调用它。
+
 ### 构建要求
 
 * macOS arm64、Apple clang
+* `curl`、`tar`（下载依赖用）
 * **`-isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk`**：本机默认 SDK（MacOSX27）的 `libSystem.tbd` 损坏，链接会报 `tapi error: malformed file`；`build.sh` 已处理，可用 `SDK=... ./build.sh` 覆盖。
 * OBS 32（默认 `/Applications/OBS.app`，可用 `OBS_APP=... ./build.sh` 覆盖）。
 * 不依赖 OBS 源码树：libobs / frontend-api 头文件与 `simde`、Qt 头文件已 vendored 在 `third_party/`。

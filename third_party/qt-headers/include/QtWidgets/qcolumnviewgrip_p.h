@@ -1,1 +1,0 @@
-/Users/yunzi/Desktop/obsplugin/obs-psd/third_party/qt-headers/src/widgets/itemviews/qcolumnviewgrip_p.h
