@@ -345,13 +345,18 @@ struct BuildState {
 // silently substituting a face.
 obs_source_t *create_obs_text_source(BuildState &st, const psd::Layer &layer, double fit)
 {
-	(void)fit;
 	obs_data_t *settings = obs_data_create();
 	obs_data_set_string(settings, "text", layer.text.c_str());
-	// Leave the font empty so OBS falls back to its own font stack, which is
-	// guaranteed to exist on this machine.
+	// Leave the font empty so OBS uses its own stack (guaranteed present).
 	obs_data_set_string(settings, "font", "");
 
+	// text_ft2_source_v2 stores the size in its "size" setting; leaving it unset
+	// leaves the source with no glyphs at all. PSD point sizes are em sizes, so
+	// scale by the same 0.7 the renderer uses, and by the canvas fit.
+	const double px = (layer.text_size > 0 ? layer.text_size * 0.7 : 48.0) * (fit > 0 ? fit : 1.0);
+	obs_data_set_int(settings, "size", (long long)(px > 1.0 ? px : 1.0));
+
+	// OBS colours are ABGR with the alpha in the high byte.
 	const double *c = st.text_style_valid ? st.text_color : layer.text_color;
 	const uint32_t r = uint32_t(std::max(0.0, std::min(1.0, c[0])) * 255.0);
 	const uint32_t g = uint32_t(std::max(0.0, std::min(1.0, c[1])) * 255.0);
@@ -363,6 +368,8 @@ obs_source_t *create_obs_text_source(BuildState &st, const psd::Layer &layer, do
 	obs_data_set_bool(settings, "drop_shadow", false);
 	obs_data_set_int(settings, "align", OBS_ALIGN_LEFT);
 	obs_data_set_bool(settings, "word_wrap", false);
+	obs_data_set_int(settings, "antialiasing", 1);
+	obs_data_set_int(settings, "log_mode", 0);
 
 	obs_source_t *src = obs_source_create("text_ft2_source_v2", layer.name.c_str(), settings, nullptr);
 	obs_data_release(settings);
@@ -370,7 +377,9 @@ obs_source_t *create_obs_text_source(BuildState &st, const psd::Layer &layer, do
 		st.err = "could not create text_ft2_source_v2 for layer '" + layer.name + "'";
 		return nullptr;
 	}
-	st.images.push_back(src); // same bookkeeping: released once the items hold a ref
+	blog(LOG_INFO, "[obs-psd] OBS text source '%s' text='%s' size=%d", layer.name.c_str(), layer.text.c_str(),
+	     int(px));
+	st.images.push_back(src);
 	return src;
 }
 
