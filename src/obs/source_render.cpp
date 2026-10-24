@@ -94,6 +94,8 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 
@@ -114,8 +116,13 @@ void unpremultiply_rgba_in_place(uint8_t *pixels, size_t count)
 	static uint16_t recip[256];
 	static std::atomic<bool> ready{false};
 	if (!ready.load(std::memory_order_acquire)) {
-		for (int a = 0; a < 256; ++a)
-			recip[a] = (uint16_t)((255 * 255 + a / 2) / a); // round(255*255/a), 0 when a==0
+		// NOTE: a == 0 must be special-cased.  The original loop started at 0
+		// and divided by it, which is an integer division-by-zero: on Windows
+		// (MSVC) that raised a structured exception inside the graphics thread
+		// and killed the queued render task, which then timed out the caller.
+		recip[0] = 0;
+		for (int a = 1; a < 256; ++a)
+			recip[a] = (uint16_t)((255 * 255 + a / 2) / a); // round(255*255/a)
 		ready.store(true, std::memory_order_release);
 	}
 
@@ -239,7 +246,7 @@ bool render_graphics_thread_(obs_source_t *src, std::vector<uint8_t> &rgba, int 
 		gs_texrender_end(tr);
 
 		ok = map_texrender(tr, surf, (int)cx, (int)cy, rgba, err);
-	}
+		}
 
 	if (surf)
 		gs_stagesurface_destroy(surf);

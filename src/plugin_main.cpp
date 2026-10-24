@@ -14,6 +14,11 @@
 #include "psd/psd.h"
 #include "ui/psd_ui.h"
 
+#ifdef OBS_PSD_SELFTEST
+#include "obs/selftest.h"
+#include <QTimer>
+#endif
+
 #include <string>
 
 OBS_DECLARE_MODULE()
@@ -36,6 +41,15 @@ void on_frontend_event(enum obs_frontend_event event, void *)
     if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
         obs_frontend_add_tools_menu_item(obs_module_text("tools_menu.import"), on_import_psd, nullptr);
         obs_frontend_add_tools_menu_item(obs_module_text("tools_menu.export"), on_export_psd, nullptr);
+        blog(LOG_INFO, "[obs-psd] Tools menu: '%s', '%s'", obs_module_text("tools_menu.import"),
+             obs_module_text("tools_menu.export"));
+#ifdef OBS_PSD_SELFTEST
+        if (obspsd::selftest_requested()) {
+            // Let OBS finish its start-up (video thread, frontend event loop)
+            // before touching graphics from the UI thread.
+            QTimer::singleShot(3000, []() { obspsd::run_selftest(); });
+        }
+#endif
     }
 }
 

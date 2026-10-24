@@ -108,16 +108,25 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 // Third-party (vendored) header: silence its unrelated diagnostics only.
+#ifdef __clang__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wmissing-field-initializers"
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
+#ifdef __clang__
 #pragma clang diagnostic pop
+#endif
 
 namespace obspsd {
 
@@ -132,17 +141,71 @@ std::vector<std::string> *g_kept_files = nullptr; // heap: no static dtor racing
 std::string g_scene_image_dir;                    // where this scene's PNGs live
 std::vector<MissingFont> g_missing_fonts;        // from the most recent build
 
+// Windows portable mode keeps everything under the OBS directory
+// (<root>/config/obs-studio) instead of %APPDATA%.  libobs'
+// os_get_config_path_ptr() knows nothing about it (portable mode is a frontend
+// concept), so a scene imported into a portable OBS would otherwise reference
+// PNGs in %APPDATA% and stop working when the portable folder is moved.
+#ifdef _WIN32
+std::string portable_config_dir()
+{
+	HMODULE module = nullptr;
+	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCWSTR>(&portable_config_dir), &module))
+		return {};
+
+	wchar_t path[MAX_PATH] = {};
+	const DWORD len = GetModuleFileNameW(module, path, MAX_PATH);
+	if (len == 0 || len >= MAX_PATH)
+		return {};
+
+	std::wstring root(path, len);
+	// <root>\obs-plugins\64bit\obs-psd.dll -> <root>
+	for (int i = 0; i < 3; ++i) {
+		const size_t slash = root.find_last_of(L"\\/");
+		if (slash == std::wstring::npos)
+			return {};
+		root.resize(slash);
+	}
+
+	const std::wstring markers[] = {root + L"\\portable_mode.txt", root + L"\\obs_portable_mode.txt",
+					root + L"\\portable_mode", root + L"\\obs_portable_mode"};
+	bool portable = false;
+	for (const std::wstring &m : markers) {
+		if (GetFileAttributesW(m.c_str()) != INVALID_FILE_ATTRIBUTES) {
+			portable = true;
+			break;
+		}
+	}
+	if (!portable)
+		return {};
+
+	const std::wstring dir = root + L"\\config\\obs-studio\\obs-psd";
+	const int need = WideCharToMultiByte(CP_UTF8, 0, dir.c_str(), -1, nullptr, 0, nullptr, nullptr);
+	if (need <= 1)
+		return {};
+	std::string out(size_t(need - 1), '\0');
+	WideCharToMultiByte(CP_UTF8, 0, dir.c_str(), -1, out.data(), need, nullptr, nullptr);
+	return out;
+}
+#endif
+
 // Directory that holds the PNGs of one imported scene:
 //   <user config>/obs-studio/obs-psd/<scene>/
 // The files must outlive the OBS process because the scene stores their paths;
 // writing to $TMPDIR made every layer disappear after a restart.
 std::string make_scene_image_dir(const std::string &scene_name)
 {
-	char *base = os_get_config_path_ptr("obs-studio/obs-psd");
 	std::string dir;
-	if (base != nullptr) {
-		dir = base;
-		bfree(base);
+#ifdef _WIN32
+	dir = portable_config_dir();
+#endif
+	if (dir.empty()) {
+		char *base = os_get_config_path_ptr("obs-studio/obs-psd");
+		if (base != nullptr) {
+			dir = base;
+			bfree(base);
+		}
 	}
 	if (dir.empty())
 		dir = "/tmp/obs-psd";
@@ -354,8 +417,15 @@ obs_source_t *create_obs_text_source(BuildState &st, const psd::Layer &layer, do
 	// list of the installed font.
 	// Resolve the PostScript name in the PSD to the FAMILY name OBS wants.
 	std::string family = psd::font_family(layer.text_font);
-	if (family.empty())
+	if (family.empty()) {
+		// A PSD may name a font that is not installed at all. Pick a face the
+		// platform's text engine can actually render so the layer is not empty.
+#ifdef _WIN32
+		family = "Microsoft YaHei UI";
+#else
 		family = "PingFang SC";
+#endif
+	}
 
 	obs_data_set_string(settings, "font", family.c_str());
 	obs_data_set_string(settings, "face", family.c_str());
@@ -425,19 +495,21 @@ obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double
 	for (int i = 0; i < 4; ++i)
 		req.stroke_color[i] = st.text_style_valid ? st.text_stroke_color[i] : layer.stroke_color[i];
 
-	// PSD fonts are frequently not installed. When that happens the user asked
-	// for an OBS text source instead of a rendered bitmap: it stays editable and
-	// OBS provides a font it can actually display.
+	// PSD fonts are frequently not installed. By default the text is rasterised
+	// with a substitute system font (see the renderer), which keeps the picture
+	// faithful. The user can opt into editable OBS text sources instead; those
+	// only work when the font is present (OBS' text source cannot synthesise a
+	// missing face), so a forced source falls back to the renderer on failure.
 	const bool psd_font_ok = layer.text_font.empty() || psd::font_is_usable(layer.text_font);
 	blog(LOG_INFO, "[obs-psd] layer '%s' font='%s' usable=%d force=%d", layer.name.c_str(),
 	     layer.text_font.c_str(), int(psd_font_ok), int(st.text_force_obs_source));
-	if (st.text_force_obs_source || !psd_font_ok) {
+	if (st.text_force_obs_source) {
 		if (psd_font_ok)
 			blog(LOG_INFO, "[obs-psd] layer '%s' forced to an OBS text source", layer.name.c_str());
 		else
 			blog(LOG_WARNING,
-			     "[obs-psd] layer '%s' uses font '%s' which is not installed; using an OBS text "
-			     "source (install the font and re-import to keep the original styling)",
+			     "[obs-psd] layer '%s' uses font '%s' which is not installed; an OBS text "
+			     "source cannot reproduce it, so the layer is rendered as a bitmap instead",
 			     layer.name.c_str(), layer.text_font.c_str());
 		if (obs_source_t *fallback = create_obs_text_source(st, layer, fit))
 			return fallback;
@@ -448,7 +520,8 @@ obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double
 	if (!psd::render_text_layer(req, res)) {
 		blog(LOG_WARNING, "[obs-psd] could not render text layer '%s' (text='%s', font='%s')",
 		     layer.name.c_str(), layer.text.c_str(), layer.text_font.c_str());
-		return nullptr;
+		// Last resort: let OBS try to display something.
+		return create_obs_text_source(st, layer, fit);
 	}
 	if (res.font_substituted) {
 		blog(LOG_WARNING,

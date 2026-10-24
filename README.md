@@ -3,6 +3,7 @@
 **OBS Studio 的 PSD 导入 / 导出插件** · PSD import/export plugin for OBS Studio
 
 [![macOS](https://img.shields.io/badge/platform-macOS%20arm64-lightgrey)]()
+[![Windows](https://img.shields.io/badge/platform-Windows%20x64-lightgrey)]()
 [![OBS](https://img.shields.io/badge/OBS-32.x-blue)]()
 [![License](https://img.shields.io/badge/license-GPL--2.0--or--later-green)]()
 
@@ -125,6 +126,73 @@ together with **@lt5d-yunzi**.
 * OBS 32（默认 `/Applications/OBS.app`，可用 `OBS_APP=... ./build.sh` 覆盖）。
 * 不依赖 OBS 源码树：libobs / frontend-api 头文件与 `simde`、Qt 头文件已 vendored 在 `third_party/`。
 
+### Windows x64（新增）
+
+Windows 端用 CMake + MSVC 构建，直接链接已安装的 OBS 32.2.2 的 DLL，不需要编译整个 OBS。
+
+前置：
+
+* Visual Studio 2022（或更新的 Build Tools）+ C++ 桌面工作负载
+* CMake ≥ 3.21
+* `third_party/obs-src`：OBS 32.2.2 源码（只用公共头文件）
+* `third_party/qt6`：与 OBS 配套的 Qt 6 SDK（`obs-deps` 的 `windows-deps-qt6-*-x64` 包）
+
+```powershell
+# 1) OBS 头文件（只取 tag，浅克隆即可）
+git clone --depth 1 --branch 32.2.2 https://github.com/obsproject/obs-studio third_party/obs-src
+
+# 2) Qt 6（OBS 32.2.2 对应 obs-deps 2026-07-15；解压后 third_party/qt6 下应有 include/ lib/ bin/）
+#    https://github.com/obsproject/obs-deps/releases/download/2026-07-15/windows-deps-qt6-2026-07-15-x64.zip
+
+# 3) 从已安装的 OBS DLL 生成导入库 obs.lib / obs-frontend-api.lib
+powershell -ExecutionPolicy Bypass -File cmake/make-import-libs.ps1 `
+    -ObsBin 'D:\64\obs-studio\bin\64bit'
+
+# 4) 构建
+cmake -S . -B build-win -G "Visual Studio 17 2022" -A x64 -DOBS_DIR=D:/64/obs-studio
+cmake --build build-win --config Release
+
+# 5) 装进便携版 OBS
+copy build-win\Release\obs-psd.dll           D:\64\obs-studio\obs-plugins\64bit\
+copy data\locale\*.ini                       D:\64\obs-studio\data\obs-plugins\obs-psd\locale\
+```
+
+构建选项 `-DOBS_PSD_SELFTEST=ON` 会编译一个开发者自测钩子（见下），发布构建保持默认 OFF。
+
+#### Windows 自测（无对话框）
+
+```powershell
+$env:OBS_PSD_SELFTEST        = 'C:\path\to\sample.psd'
+$env:OBS_PSD_SELFTEST_OUT    = 'C:\path\to\roundtrip.psd'
+$env:OBS_PSD_SELFTEST_REPORT = 'C:\path\to\report.txt'
+D:\64\obs-studio\bin\64bit\obs64.exe
+```
+
+启动后 3 秒，插件会读取该 PSD、建场景、保存场景集合、再导出一份 PSD，并把结果写进 report。
+用 `tests/verify_psd.py` 可独立校验导出的文件。
+
+Windows 端已验证（便携版 OBS 32.2.2，Windows 11）：
+
+* `杂谈PSD022.psd`：23 图层（3 个文本层、6 个分组）→ 场景 8 个顶层项 / 15 个图片源；
+  缺失字体 `ShanghaiFace-Zen-BoldGB2.0` 自动回退到 `Microsoft YaHei UI` 并记录；
+  导出 15 层 → `verify_psd.py` 校验通过；重启后场景与图层仍在。
+* `红蓝测试图.psd`：2 图层往返正常。
+
+#### Windows 端顺带修掉的问题
+
+* **导出把每个可见源都判成 “null source”**（`scene_export.cpp` 多传了一次
+  `ignore_reason(nullptr, ...)`）：可见源全部被跳过，导出永远是空 PSD。已删除。
+* **反预乘表的除零崩溃**（`source_render.cpp`）：`recip[0]` 的计算除以 0，在 Windows
+  上抛出结构化异常并杀死图形线程里的渲染任务，调用方等 10 秒超时——表现为导出卡死。
+  现在 0 单独处理。
+* **本地化文本被截断**：OBS 的 locale 解析器按空白切分，含空格的值必须加引号，
+  否则菜单只显示“导入/导出场景为”。两个 ini 已加引号。
+* **便携版路径**：便携模式下列图 PNG 现在写到 `<OBS>\config\obs-studio\obs-psd\`，
+  不再写 `%APPDATA%`，整个便携目录可以搬走。
+* **缺字体时的回退**：默认改为用系统 CJK 字体栅格化（原先无条件创建
+  `text_ft2_source_v2`，在 macOS/Windows 上都会 0×0 显示空白）；只有勾选
+  “始终使用 OBS 文本源” 时才创建文本源。
+
 ## 目录
 
 ```
@@ -153,8 +221,8 @@ third_party/            stb、simde、OBS 头文件、Qt 头文件
 
 ## English
 
-**obs-Import-psd** is a macOS plugin for OBS Studio 32 that imports Photoshop documents
-as layered scenes and exports scenes back to PSD.
+**obs-Import-psd** is an OBS Studio 32 plugin for macOS arm64 and Windows x64 that imports
+Photoshop documents as layered scenes and exports scenes back to PSD.
 
 ### Features
 
@@ -224,8 +292,9 @@ and the scene survives an OBS restart.
 
 See the Chinese section below for the full list — in short:
 
-1. `text_ft2_source_v2` renders as `0x0` (six different configurations tried; the
-   rasteriser path is the working one).
+1. `text_ft2_source_v2` renders as `0x0` when it is used (six different configurations
+   tried; the rasteriser path is the working one). The default path no longer creates a
+   text source when the font is missing: it rasterises with a substitute system font.
 2. A type layer's fill colour and stroke cannot be read back from the PSD automatically
    (they live in EngineData / the lfx2 descriptor); the import dialog asks for them.
 3. The text size uses empirical factors (0.7 for the em ratio, 0.1 for tracking).

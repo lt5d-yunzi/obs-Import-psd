@@ -156,9 +156,7 @@ bool scene_to_document(obs_scene_t *scene, const ExportOptions &opts, psd::Docum
         rep.type = source_type_label(src);
 
         const bool hidden = !obs_sceneitem_visible(item);
-        std::string reason = ignore_reason(src, rules, name);
-        if (!hidden && reason.empty())
-            reason = ignore_reason(nullptr, rules, name);
+        const std::string reason = ignore_reason(src, rules, name);
         // Hidden items are exported as invisible layers (keeps the document
         // faithful); skipped capture sources are dropped entirely.
         const bool skip = !reason.empty() && !hidden;
@@ -214,6 +212,12 @@ bool scene_to_document(obs_scene_t *scene, const ExportOptions &opts, psd::Docum
         std::string err;
         int rw = int(sw), rh = int(sh);
         if (!render_source_to_rgba_blocking(src, px, rw, rh, err)) {
+            // A graphics-thread timeout means every following item will fail the
+            // same way; abort instead of stalling for 10 s per layer.
+            if (err.find("timed out") != std::string::npos) {
+                result.error = err;
+                return false;
+            }
             rep.skipped = true;
             rep.reason = err;
             ++result.skipped;

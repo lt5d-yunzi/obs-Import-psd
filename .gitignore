@@ -1,14 +1,17 @@
 # Build output
 build/
+build-win*/
 dist/
 *.o
 *.dSYM/
 psd_rt.psd
 
-# Vendored third-party code: downloaded by fetch-deps.sh, never committed.
-# (Qt headers, OBS/libobs headers, simde, miniz, stb, tinyexr)
+# Vendored third-party code: downloaded by fetch-deps.sh / cmake/make-import-libs.ps1,
+# never committed.  (Qt SDK, OBS/libobs headers, import libraries, simde, miniz, stb)
 third_party/
 
 # Scratch
 .work/
 .scratch/
+.tools/
+.tmp/
