@@ -77,6 +77,7 @@ bool font_is_usable(const std::string &font)
 			// installed fonts report as their PostScript name.
 			const std::string resolved(buf);
 			ok = (resolved == font) || (resolved.rfind(font + "-", 0) == 0) || (font.rfind(resolved, 0) == 0);
+
 		}
 		CFRelease(actual);
 	}

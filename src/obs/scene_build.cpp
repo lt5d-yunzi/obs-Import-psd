@@ -347,8 +347,24 @@ obs_source_t *create_obs_text_source(BuildState &st, const psd::Layer &layer, do
 {
 	obs_data_t *settings = obs_data_create();
 	obs_data_set_string(settings, "text", layer.text.c_str());
-	// Leave the font empty so OBS uses its own stack (guaranteed present).
-	obs_data_set_string(settings, "font", "");
+	// text_ft2_source_v2 does not render anything with an empty font name, so
+	// pick a real one: the PSD font when it is installed, otherwise a system
+	// CJK face that always exists on macOS.
+	std::string font = layer.text_font;
+	if (font.empty() || !psd::font_is_usable(font)) {
+		const char *candidates[] = {"PingFangSC-Semibold", "STHeitiSC-Medium", "HiraginoSansGB-W3",
+					    "Helvetica"};
+		font.clear();
+		for (const char *c : candidates) {
+			if (psd::font_is_usable(c)) {
+				font = c;
+				break;
+			}
+		}
+	}
+	if (font.empty())
+		font = "Helvetica";
+	obs_data_set_string(settings, "font", font.c_str());
 
 	// text_ft2_source_v2 stores the size in its "size" setting; leaving it unset
 	// leaves the source with no glyphs at all. PSD point sizes are em sizes, so
@@ -377,8 +393,8 @@ obs_source_t *create_obs_text_source(BuildState &st, const psd::Layer &layer, do
 		st.err = "could not create text_ft2_source_v2 for layer '" + layer.name + "'";
 		return nullptr;
 	}
-	blog(LOG_INFO, "[obs-psd] OBS text source '%s' text='%s' size=%d", layer.name.c_str(), layer.text.c_str(),
-	     int(px));
+	blog(LOG_INFO, "[obs-psd] OBS text source '%s' text='%s' size=%d font='%s'", layer.name.c_str(),
+	     layer.text.c_str(), int(px), font.c_str());
 	st.images.push_back(src);
 	return src;
 }
@@ -407,13 +423,16 @@ obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double
 	// for an OBS text source instead of a rendered bitmap: it stays editable and
 	// OBS provides a font it can actually display.
 	const bool psd_font_ok = layer.text_font.empty() || psd::font_is_usable(layer.text_font);
+	blog(LOG_INFO, "[obs-psd] layer '%s' font='%s' usable=%d force=%d", layer.name.c_str(),
+	     layer.text_font.c_str(), int(psd_font_ok), int(st.text_force_obs_source));
 	if (st.text_force_obs_source || !psd_font_ok) {
-		if (st.text_force_obs_source && psd_font_ok)
+		if (psd_font_ok)
 			blog(LOG_INFO, "[obs-psd] layer '%s' forced to an OBS text source", layer.name.c_str());
-		blog(LOG_WARNING,
-		     "[obs-psd] layer '%s' uses font '%s' which is not installed; using an OBS text source "
-		     "(install the font and re-import to keep the original styling)",
-		     layer.name.c_str(), layer.text_font.c_str());
+		else
+			blog(LOG_WARNING,
+			     "[obs-psd] layer '%s' uses font '%s' which is not installed; using an OBS text "
+			     "source (install the font and re-import to keep the original styling)",
+			     layer.name.c_str(), layer.text_font.c_str());
 		if (obs_source_t *fallback = create_obs_text_source(st, layer, fit))
 			return fallback;
 		// Fall through to the renderer if OBS could not create the source.
