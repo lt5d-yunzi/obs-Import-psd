@@ -8,6 +8,7 @@
 #include "obs/scene_export.h"
 #include "obs/source_render.h"
 #include "psd/psd.h"
+#include "psd/psd_file.h"
 
 #include <cstdarg>
 #include <cstdio>
@@ -18,10 +19,38 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace obspsd {
 namespace {
 
 std::ofstream *g_report = nullptr;
+
+// Environment variables are UTF-16 on Windows; everything downstream (and the
+// PSD reader) expects UTF-8.  getenv() would return ANSI bytes and mangle
+// non-ASCII paths.
+std::string env_utf8(const char *name)
+{
+#ifdef _WIN32
+	wchar_t wname[128] = {};
+	MultiByteToWideChar(CP_UTF8, 0, name, -1, wname, 128);
+	wchar_t value[32768] = {};
+	const DWORD n = GetEnvironmentVariableW(wname, value, 32768);
+	if (n == 0 || n >= 32768)
+		return {};
+	const int need = WideCharToMultiByte(CP_UTF8, 0, value, -1, nullptr, 0, nullptr, nullptr);
+	if (need <= 1)
+		return {};
+	std::string out(size_t(need - 1), '\0');
+	WideCharToMultiByte(CP_UTF8, 0, value, -1, out.data(), need, nullptr, nullptr);
+	return out;
+#else
+	const char *v = std::getenv(name);
+	return v ? std::string(v) : std::string();
+#endif
+}
 
 void report(const char *fmt, ...)
 {
@@ -92,15 +121,25 @@ bool selftest_requested()
 
 void run_selftest()
 {
-	const char *input = std::getenv("OBS_PSD_SELFTEST");
-	const char *output = std::getenv("OBS_PSD_SELFTEST_OUT");
-	const char *report_path = std::getenv("OBS_PSD_SELFTEST_REPORT");
+	const std::string input = env_utf8("OBS_PSD_SELFTEST");
+	const std::string output = env_utf8("OBS_PSD_SELFTEST_OUT");
+	const std::string report_path = env_utf8("OBS_PSD_SELFTEST_REPORT");
 
-	if (report_path && *report_path)
+	if (!report_path.empty()) {
+#ifdef _WIN32
+		const int need = MultiByteToWideChar(CP_UTF8, 0, report_path.c_str(), -1, nullptr, 0);
+		if (need > 1) {
+			std::wstring wpath(size_t(need), L'\0');
+			MultiByteToWideChar(CP_UTF8, 0, report_path.c_str(), -1, wpath.data(), need);
+			g_report = new std::ofstream(wpath.c_str(), std::ios::out | std::ios::trunc);
+		}
+#else
 		g_report = new std::ofstream(report_path, std::ios::out | std::ios::trunc);
+#endif
+	}
 
 	report("=== obs-psd selftest ===");
-	report("input: %s", input);
+	report("input: %s", input.c_str());
 
 	remove_old_selftest_scenes();
 
@@ -123,6 +162,8 @@ void run_selftest()
 		SceneBuildOptions opts;
 		opts.placement = SceneBuildOptions::Place_FitCanvas;
 		opts.image_load_timeout_ms = 15000;
+		// Exercise the "Always use OBS text sources" import option too.
+		opts.text_force_obs_source = !env_utf8("OBS_PSD_SELFTEST_FORCE_TEXT").empty();
 		std::string build_err;
 		obs_source_t *scene_src = nullptr;
 		const bool ok = build_scene_from_psd(doc, "obs-psd selftest", build_err, &scene_src, opts);
@@ -136,7 +177,7 @@ void run_selftest()
 		const std::vector<std::string> files = generated_image_files();
 		unsigned long long bytes = 0;
 		for (const std::string &f : files) {
-			FILE *fp = fopen(f.c_str(), "rb");
+			FILE *fp = psd::detail::fopen_utf8(f, "rb");
 			if (!fp)
 				continue;
 			fseek(fp, 0, SEEK_END);
@@ -151,12 +192,12 @@ void run_selftest()
 
 		report("on graphics thread: %d", int(on_graphics_thread()));
 
-		if (output && *output) {
+		if (!output.empty()) {
 			ExportOptions eo;
 			ExportResult er;
 			const bool eok = export_scene_to_psd(obs_scene_from_source(scene_src), output, eo, er);
 			report("export: %s (%zu exported, %zu skipped) -> %s", eok ? "ok" : "FAIL", er.exported, er.skipped,
-			       output);
+			       output.c_str());
 			if (!eok)
 				report("export error: %s", er.error.c_str());
 			for (const auto &it : er.items)

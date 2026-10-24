@@ -243,8 +243,8 @@ void run_export_dialog()
 
     auto *form = new QFormLayout();
     auto *path_edit = new QLineEdit(&dlg);
-    QString default_dir = QString::fromUtf8(getenv("HOME") ? getenv("HOME") : "~");
-    path_edit->setText(default_dir + "/" + scene_name + ".psd");
+    const QString default_dir = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    path_edit->setText(QDir(default_dir).filePath(scene_name + ".psd"));
     auto *browse = new QPushButton(QObject::tr("Browse..."), &dlg);
     QObject::connect(browse, &QPushButton::clicked, &dlg, [&]() {
         const QString p = QFileDialog::getSaveFileName(main_parent(), QObject::tr("Save PSD"),
@@ -285,12 +285,11 @@ void run_export_dialog()
             ExportOptions opts;
             opts.extra_ignore_ids = extra_edit->text().toStdString();
             ExportResult res;
-            std::string path = path_edit->text().toStdString();
-            if (path.size() < 4 || path.compare(path.size() - 4, 4, ".psd") != 0 ||
-                path.compare(path.size() - 4, 4, ".PSD") != 0)
+            QString path = path_edit->text();
+            if (!path.endsWith(".psd", Qt::CaseInsensitive))
                 path += ".psd";
 
-            const bool ok = export_scene_to_psd(scene, path, opts, res);
+            const bool ok = export_scene_to_psd(scene, path.toStdString(), opts, res);
 
             QStringList lines;
             for (const auto &it : res.items) {

@@ -93,6 +93,7 @@
 
 #include "scene_build.h"
 #include "obs/text_render.h"
+#include "../psd/psd_file.h"
 
 #include <obs.h>
 #include <obs-frontend-api.h>
@@ -255,6 +256,15 @@ void apply_opacity(std::vector<uint8_t> &rgba, float opacity)
 // the scene item is always placed at (0,0) with scale 1, so the result does not
 // depend on how OBS interprets per-item transforms (which shifted items when a
 // group or a bounds mode was involved).
+// stbi_write_png_to_func() callback: write the encoded PNG straight to a FILE*
+// that was opened with the UTF-8-aware fopen.
+void write_png_bytes(void *context, void *data, int size)
+{
+	FILE *f = static_cast<FILE *>(context);
+	if (size > 0)
+		std::fwrite(data, 1, size_t(size), f);
+}
+
 bool write_layer_png(const psd::Layer &layer, int canvas_w, int canvas_h, bool full_canvas,
 		     std::string &path_out, std::string &err)
 {
@@ -304,7 +314,19 @@ bool write_layer_png(const psd::Layer &layer, int canvas_w, int canvas_h, bool f
 		path = make_scene_image_path(g_scene_image_dir);
 	}
 
-	if (!stbi_write_png(path.c_str(), out_w, out_h, 4, pixels.data(), out_w * 4)) {
+	// stb_image_write opens files with fopen(), which mangles non-ASCII paths on
+	// Windows.  Render into a callback that writes through our UTF-8-aware
+	// helper instead.
+	FILE *png_file = psd::detail::fopen_utf8(path, "wb");
+	if (png_file == nullptr) {
+		err = "could not write layer PNG: " + path;
+		return false;
+	}
+	bool png_ok = stbi_write_png_to_func(write_png_bytes, png_file, out_w, out_h, 4, pixels.data(), out_w * 4) != 0;
+	if (std::fclose(png_file) != 0)
+		png_ok = false;
+	if (!png_ok) {
+		psd::detail::remove_utf8(path);
 		err = "could not write layer PNG: " + path;
 		return false;
 	}
@@ -503,17 +525,18 @@ obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double
 	const bool psd_font_ok = layer.text_font.empty() || psd::font_is_usable(layer.text_font);
 	blog(LOG_INFO, "[obs-psd] layer '%s' font='%s' usable=%d force=%d", layer.name.c_str(),
 	     layer.text_font.c_str(), int(psd_font_ok), int(st.text_force_obs_source));
-	if (st.text_force_obs_source) {
-		if (psd_font_ok)
-			blog(LOG_INFO, "[obs-psd] layer '%s' forced to an OBS text source", layer.name.c_str());
-		else
-			blog(LOG_WARNING,
-			     "[obs-psd] layer '%s' uses font '%s' which is not installed; an OBS text "
-			     "source cannot reproduce it, so the layer is rendered as a bitmap instead",
-			     layer.name.c_str(), layer.text_font.c_str());
-		if (obs_source_t *fallback = create_obs_text_source(st, layer, fit))
-			return fallback;
+	if (st.text_force_obs_source && psd_font_ok) {
+		blog(LOG_INFO, "[obs-psd] layer '%s' forced to an OBS text source", layer.name.c_str());
+		if (obs_source_t *src = create_obs_text_source(st, layer, fit))
+			return src;
 		// Fall through to the renderer if OBS could not create the source.
+	} else if (st.text_force_obs_source) {
+		// OBS' text source cannot synthesise a face it does not have; creating
+		// one would leave an empty 0x0 source on screen. Bitmap path instead.
+		blog(LOG_WARNING,
+		     "[obs-psd] layer '%s' uses font '%s' which is not installed; an OBS text "
+		     "source cannot reproduce it, so the layer is rendered as a bitmap instead",
+		     layer.name.c_str(), layer.text_font.c_str());
 	}
 
 	psd::TextRenderResult res;

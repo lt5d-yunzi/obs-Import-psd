@@ -165,6 +165,8 @@ copy data\locale\*.ini                       D:\64\obs-studio\data\obs-plugins\o
 $env:OBS_PSD_SELFTEST        = 'C:\path\to\sample.psd'
 $env:OBS_PSD_SELFTEST_OUT    = 'C:\path\to\roundtrip.psd'
 $env:OBS_PSD_SELFTEST_REPORT = 'C:\path\to\report.txt'
+# 可选：模拟勾选“始终使用 OBS 文本源”
+$env:OBS_PSD_SELFTEST_FORCE_TEXT = '1'
 D:\64\obs-studio\bin\64bit\obs64.exe
 ```
 
@@ -177,6 +179,9 @@ Windows 端已验证（便携版 OBS 32.2.2，Windows 11）：
   缺失字体 `ShanghaiFace-Zen-BoldGB2.0` 自动回退到 `Microsoft YaHei UI` 并记录；
   导出 15 层 → `verify_psd.py` 校验通过；重启后场景与图层仍在。
 * `红蓝测试图.psd`：2 图层往返正常。
+* 真实 UI 路径（不是自测钩子）：工具菜单 → “导入 PSD 为场景…” → 文件对话框选
+  `杂谈PSD022.psd` → 导入对话框确定 → 日志 `built scene '杂谈PSD022' from 23 PSD layer(s)`，
+  场景与图层 PNG 都正确落盘并随场景集合保存。
 * PSD 编解码测试在 MSVC 下同样通过：`ROUND TRIP OK (154 checks)`、
   `verify_psd.py` 独立校验、3000 次 fuzz 冒烟（0 crash / 0 hang）。
   （测试的临时文件路径已改为 `%TEMP%`，不再硬编码 `/tmp`。）
@@ -188,13 +193,19 @@ Windows 端已验证（便携版 OBS 32.2.2，Windows 11）：
 * **反预乘表的除零崩溃**（`source_render.cpp`）：`recip[0]` 的计算除以 0，在 Windows
   上抛出结构化异常并杀死图形线程里的渲染任务，调用方等 10 秒超时——表现为导出卡死。
   现在 0 单独处理。
+* **中文路径打不开/导出失败**（`psd_read/write`）：代码全程用 UTF-8 路径，而 Windows 的
+  `fopen()` 按 ANSI 代码页解释路径，选一个中文名的 PSD 就报 “cannot open file”。
+  现在经 `psd::detail::fopen_utf8()`（UTF-8 → UTF-16 + `_wfopen`）打开；图层 PNG 的写出
+  也改用 `stbi_write_png_to_func()` 走同一条路径。
+* **导出对话框**：默认目录原来直接用 `$HOME`（Windows 上没有），改为“文档”目录；
+  补 `.psd` 后缀的判断写反（`||` 两个 `!=`），会把 `x.psd` 存成 `x.psd.psd`，已修。
 * **本地化文本被截断**：OBS 的 locale 解析器按空白切分，含空格的值必须加引号，
   否则菜单只显示“导入/导出场景为”。两个 ini 已加引号。
 * **便携版路径**：便携模式下列图 PNG 现在写到 `<OBS>\config\obs-studio\obs-psd\`，
   不再写 `%APPDATA%`，整个便携目录可以搬走。
 * **缺字体时的回退**：默认改为用系统 CJK 字体栅格化（原先无条件创建
-  `text_ft2_source_v2`，在 macOS/Windows 上都会 0×0 显示空白）；只有勾选
-  “始终使用 OBS 文本源” 时才创建文本源。
+  `text_ft2_source_v2`，在 macOS/Windows 上都会 0×0 显示空白）；勾选
+  “始终使用 OBS 文本源” 时，字体存在才建文本源，字体缺失同样回退到位图。
 
 ## 目录
 
