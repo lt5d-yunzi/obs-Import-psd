@@ -47,4 +47,8 @@ bool render_text_layer(const TextRenderRequest &req, TextRenderResult &out);
 // True when `font` exists on this machine and covers the CJK block.
 bool font_is_usable(const std::string &font);
 
+// Family name for a PostScript name ("PingFangSC-Semibold" -> "PingFang SC").
+// OBS' text sources select the typeface by family name. Empty when unknown.
+std::string font_family(const std::string &font);
+
 } // namespace psd

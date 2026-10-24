@@ -90,6 +90,29 @@ bool font_is_usable(const std::string &font)
 	return ok;
 }
 
+std::string font_family(const std::string &font)
+{
+	if (font.empty())
+		return {};
+	CFStringRef name = cf_string(font);
+	if (name == nullptr)
+		return {};
+	CTFontRef f = CTFontCreateWithName(name, 12.0, nullptr);
+	CFRelease(name);
+	if (f == nullptr)
+		return {};
+	std::string out;
+	CFStringRef fam = CTFontCopyFamilyName(f);
+	if (fam != nullptr) {
+		char buf[256] = {};
+		if (CFStringGetCString(fam, buf, sizeof buf, kCFStringEncodingUTF8))
+			out = buf;
+		CFRelease(fam);
+	}
+	CFRelease(f);
+	return out;
+}
+
 bool render_text_layer(const TextRenderRequest &req, TextRenderResult &out)
 {
 	out = TextRenderResult();

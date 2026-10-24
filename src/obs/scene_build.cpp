@@ -347,28 +347,23 @@ obs_source_t *create_obs_text_source(BuildState &st, const psd::Layer &layer, do
 {
 	obs_data_t *settings = obs_data_create();
 	obs_data_set_string(settings, "text", layer.text.c_str());
-	// text_ft2_source_v2 does not render anything with an empty font name, so
-	// pick a real one: the PSD font when it is installed, otherwise a system
-	// CJK face that always exists on macOS.
-	std::string font = layer.text_font;
-	if (font.empty() || !psd::font_is_usable(font)) {
-		const char *candidates[] = {"PingFangSC-Semibold", "STHeitiSC-Medium", "HiraginoSansGB-W3",
-					    "Helvetica"};
-		font.clear();
-		for (const char *c : candidates) {
-			if (psd::font_is_usable(c)) {
-				font = c;
-				break;
-			}
-		}
-	}
-	if (font.empty())
-		font = "Helvetica";
-	obs_data_set_string(settings, "font", font.c_str());
+	// text_ft2_source_v2 selects the typeface through "face" (a font FAMILY
+	// name) plus "style"; "font" alone is not enough and left the source with
+	// no glyphs at all (it rendered 0x0). Family names differ from PostScript
+	// names ("PingFang SC" vs "PingFangSC-Semibold"), so map through the family
+	// list of the installed font.
+	// Resolve the PostScript name in the PSD to the FAMILY name OBS wants.
+	std::string family = psd::font_family(layer.text_font);
+	if (family.empty())
+		family = "PingFang SC";
 
-	// text_ft2_source_v2 stores the size in its "size" setting; leaving it unset
-	// leaves the source with no glyphs at all. PSD point sizes are em sizes, so
-	// scale by the same 0.7 the renderer uses, and by the canvas fit.
+	obs_data_set_string(settings, "font", family.c_str());
+	obs_data_set_string(settings, "face", family.c_str());
+	obs_data_set_string(settings, "style", "Regular");
+	obs_data_set_bool(settings, "use_color", true);
+
+	// PSD point sizes are em sizes; 0.7 matches the glyph height ratio used by
+	// the bitmap renderer.
 	const double px = (layer.text_size > 0 ? layer.text_size * 0.7 : 48.0) * (fit > 0 ? fit : 1.0);
 	obs_data_set_int(settings, "size", (long long)(px > 1.0 ? px : 1.0));
 
@@ -385,7 +380,7 @@ obs_source_t *create_obs_text_source(BuildState &st, const psd::Layer &layer, do
 	obs_data_set_int(settings, "align", OBS_ALIGN_LEFT);
 	obs_data_set_bool(settings, "word_wrap", false);
 	obs_data_set_int(settings, "antialiasing", 1);
-	obs_data_set_int(settings, "log_mode", 0);
+	obs_data_set_int(settings, "log_mode", 0);	obs_data_set_int(settings, "log_mode", 0);
 
 	// Create the source first and then apply the settings, which is exactly what
 	// the OBS UI does. text_ft2_source_v2 builds its glyph cache in
@@ -400,8 +395,8 @@ obs_source_t *create_obs_text_source(BuildState &st, const psd::Layer &layer, do
 	obs_source_update(src, settings);
 	obs_data_release(settings);
 
-	blog(LOG_INFO, "[obs-psd] OBS text source '%s' '%s' size=%lld -> %ux%u", layer.name.c_str(),
-	     layer.text.c_str(), (long long)px, obs_source_get_width(src), obs_source_get_height(src));
+	blog(LOG_INFO, "[obs-psd] OBS text source '%s' '%s' face='%s' size=%lld -> %ux%u", layer.name.c_str(),
+	     layer.text.c_str(), family.c_str(), (long long)px, obs_source_get_width(src), obs_source_get_height(src));
 	st.images.push_back(src);
 	return src;
 }
