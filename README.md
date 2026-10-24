@@ -11,6 +11,23 @@
 
 ---
 
+## 平台 / 分支 / 构建方式
+
+| 平台 | 分支 | 构建入口 | 说明 |
+|---|---|---|---|
+| macOS arm64 | `main` | `./build.sh` | 原生开发线，CoreText 文本渲染 |
+| Windows x64 | `windows` | `build-win.ps1` | CMake + MSVC，Qt 文本渲染，链接已安装的 OBS DLL |
+
+两条线共享 `src/psd/`、`src/obs/`、`src/ui/` 与 `tests/`；`windows` 分支在此基础上增加
+CMake 工程、Qt 文本渲染器、UTF-8 路径支持以及 Windows 端验证记录。
+
+**选择编译哪一端，取决于你运行哪个脚本**：macOS 用 `./build.sh`，Windows 用
+`build-win.ps1`。CMake 内部按 `WIN32` 自动选择文本渲染实现（Windows → Qt，其它 →
+CoreText），不需要手动切换宏；`-DOBS_PSD_SELFTEST=ON` 可额外编译开发者自测钩子
+（发布构建默认关闭）。
+
+---
+
 ## 作者 / Author
 
 **鲸鱼少女** (Whale Girl) — built with [DeepSeek Harness](https://github.com/deepseek-ai) as a coding agent,
@@ -144,17 +161,23 @@ git clone --depth 1 --branch 32.2.2 https://github.com/obsproject/obs-studio thi
 # 2) Qt 6（OBS 32.2.2 对应 obs-deps 2026-07-15；解压后 third_party/qt6 下应有 include/ lib/ bin/）
 #    https://github.com/obsproject/obs-deps/releases/download/2026-07-15/windows-deps-qt6-2026-07-15-x64.zip
 
-# 3) 从已安装的 OBS DLL 生成导入库 obs.lib / obs-frontend-api.lib
-powershell -ExecutionPolicy Bypass -File cmake/make-import-libs.ps1 `
-    -ObsBin 'D:\64\obs-studio\bin\64bit'
+# 3) 一键构建（缺导入库时会自动生成）
+powershell -ExecutionPolicy Bypass -File build-win.ps1 -ObsDir 'D:\64\obs-studio'
 
-# 4) 构建
+# 4) 构建并直接装进便携版 OBS
+powershell -ExecutionPolicy Bypass -File build-win.ps1 -ObsDir 'D:\64\obs-studio' -Install
+
+# 可选：带自测钩子的开发者构建
+powershell -ExecutionPolicy Bypass -File build-win.ps1 -Install -SelfTest
+```
+
+`build-win.ps1` 支持 `-QtRoot`、`-ObsHeaders`、`-Configuration`，缺依赖时会打印需要补齐的
+目录与下载地址。也可以手动走 CMake：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File cmake/make-import-libs.ps1 -ObsBin 'D:\64\obs-studio\bin\64bit'
 cmake -S . -B build-win -G "Visual Studio 17 2022" -A x64 -DOBS_DIR=D:/64/obs-studio
 cmake --build build-win --config Release
-
-# 5) 装进便携版 OBS
-copy build-win\Release\obs-psd.dll           D:\64\obs-studio\obs-plugins\64bit\
-copy data\locale\*.ini                       D:\64\obs-studio\data\obs-plugins\obs-psd\locale\
 ```
 
 构建选项 `-DOBS_PSD_SELFTEST=ON` 会编译一个开发者自测钩子（见下），发布构建保持默认 OFF。
