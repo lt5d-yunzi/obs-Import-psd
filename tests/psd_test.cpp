@@ -24,9 +24,26 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
+
+// Tests write their scratch files into a temporary directory.  "/tmp" does not
+// exist on Windows, so use %TEMP% there and $TMPDIR (or /tmp) elsewhere.
+static std::string tmp_file(const char *name)
+{
+#ifdef _WIN32
+    const char *base = std::getenv("TEMP");
+    if (!base || !*base)
+        base = ".";
+#else
+    const char *base = std::getenv("TMPDIR");
+    if (!base || !*base)
+        base = "/tmp";
+#endif
+    return std::string(base) + "/" + name;
+}
 
 static int g_failures = 0;
 static int g_checks = 0;
@@ -85,9 +102,9 @@ static psd::Layer make_group(const std::string &name, bool visible)
     return G;
 }
 
-static bool read_bytes(const char *path, std::vector<uint8_t> &out)
+static bool read_bytes(const std::string &path, std::vector<uint8_t> &out)
 {
-    FILE *f = std::fopen(path, "rb");
+    FILE *f = std::fopen(path.c_str(), "rb");
     if (f == nullptr)
         return false;
     out.clear();
@@ -243,12 +260,12 @@ static void compare_composite_rgb(const psd::Document &in, const std::vector<uin
         }
 }
 
-static void rewrite_identical(const char *path1, const char *path2, const char *what)
+static void rewrite_identical(const std::string &path1, const std::string &path2, const char *what)
 {
     std::vector<uint8_t> a, b;
     const bool ok1 = read_bytes(path1, a);
     const bool ok2 = read_bytes(path2, b);
-    CHECK(ok1 && ok2, "%s: cannot read back %s/%s", what, path1, path2);
+    CHECK(ok1 && ok2, "%s: cannot read back %s/%s", what, path1.c_str(), path2.c_str());
     const bool same = ok1 && ok2 && a.size() == b.size() && std::memcmp(a.data(), b.data(), a.size()) == 0;
     CHECK(same, "%s: rewrite is not byte-identical (%zu vs %zu bytes)", what, a.size(), b.size());
 }
@@ -279,14 +296,14 @@ int main()
         doc.layers.push_back(top);
     }
     CHECK(doc.layers.size() == 3, "setup");
-    if (!psd::write_file("/tmp/psd_rt.psd", doc, err)) {
+    if (!psd::write_file(tmp_file("psd_rt.psd"), doc, err)) {
         printf("WRITE FAILED: %s\n", err.c_str());
         return 1;
     }
-    printf("wrote /tmp/psd_rt.psd\n");
+    printf("wrote %s\n", tmp_file("psd_rt.psd").c_str());
 
     psd::Document in;
-    if (!psd::read_file("/tmp/psd_rt.psd", in, err)) {
+    if (!psd::read_file(tmp_file("psd_rt.psd"), in, err)) {
         printf("READ FAILED: %s\n", err.c_str());
         return 1;
     }
@@ -309,7 +326,7 @@ int main()
             return 1;
         }
         std::vector<uint8_t> file;
-        CHECK(read_bytes("/tmp/psd_rt.psd", file) && file.size() == mem.size() &&
+        CHECK(read_bytes(tmp_file("psd_rt.psd"), file) && file.size() == mem.size() &&
                   std::memcmp(file.data(), mem.data(), file.size()) == 0,
               "write_memory differs from write_file");
         compare_layers(doc.layers, back.layers, "memory");
@@ -320,11 +337,11 @@ int main()
     // group representation is preserved exactly).
     {
         std::string e2;
-        if (!psd::write_file("/tmp/psd_rt2.psd", in, e2)) {
+        if (!psd::write_file(tmp_file("psd_rt2.psd"), in, e2)) {
             printf("REWRITE FAILED: %s\n", e2.c_str());
             return 1;
         }
-        rewrite_identical("/tmp/psd_rt.psd", "/tmp/psd_rt2.psd", "flat");
+        rewrite_identical(tmp_file("psd_rt.psd"), tmp_file("psd_rt2.psd"), "flat");
     }
 
     // ---------------- 2. empty & fully transparent layers ------------------
@@ -340,22 +357,22 @@ int main()
             t.rgba[i + 3] = 0; // fully transparent
         d.layers.push_back(t);
         std::string e2;
-        if (!psd::write_file("/tmp/psd_empty.psd", d, e2)) {
+        if (!psd::write_file(tmp_file("psd_empty.psd"), d, e2)) {
             printf("EMPTY WRITE FAILED: %s\n", e2.c_str());
             return 1;
         }
         psd::Document r;
-        if (!psd::read_file("/tmp/psd_empty.psd", r, e2)) {
+        if (!psd::read_file(tmp_file("psd_empty.psd"), r, e2)) {
             printf("EMPTY READ FAILED: %s\n", e2.c_str());
             return 1;
         }
         compare_layers(d.layers, r.layers, "empty");
         compare_composite_rgb(r, reference_flatten(d), "empty");
-        if (!psd::write_file("/tmp/psd_empty2.psd", r, e2)) {
+        if (!psd::write_file(tmp_file("psd_empty2.psd"), r, e2)) {
             printf("EMPTY REWRITE FAILED: %s\n", e2.c_str());
             return 1;
         }
-        rewrite_identical("/tmp/psd_empty.psd", "/tmp/psd_empty2.psd", "empty");
+        rewrite_identical(tmp_file("psd_empty.psd"), tmp_file("psd_empty2.psd"), "empty");
     }
 
     // ---------------- 3. group document ------------------------------------
@@ -372,12 +389,12 @@ int main()
     gdoc.layers.push_back(make_layer("Top", 0, 0, 40, 30, 11));
 
     CHECK(gdoc.layers.size() == 7, "group setup");
-    if (!psd::write_file("/tmp/psd_group.psd", gdoc, err)) {
+    if (!psd::write_file(tmp_file("psd_group.psd"), gdoc, err)) {
         printf("GROUP WRITE FAILED: %s\n", err.c_str());
         return 1;
     }
     psd::Document gin;
-    if (!psd::read_file("/tmp/psd_group.psd", gin, err)) {
+    if (!psd::read_file(tmp_file("psd_group.psd"), gin, err)) {
         printf("GROUP READ FAILED: %s\n", err.c_str());
         return 1;
     }
@@ -392,11 +409,11 @@ int main()
     compare_composite_rgb(gin, reference_flatten(gdoc), "group");
     {
         std::string e2;
-        if (!psd::write_file("/tmp/psd_group2.psd", gin, e2)) {
+        if (!psd::write_file(tmp_file("psd_group2.psd"), gin, e2)) {
             printf("GROUP REWRITE FAILED: %s\n", e2.c_str());
             return 1;
         }
-        rewrite_identical("/tmp/psd_group.psd", "/tmp/psd_group2.psd", "group");
+        rewrite_identical(tmp_file("psd_group.psd"), tmp_file("psd_group2.psd"), "group");
     }
 
     // ---------------- 4. document without layers ---------------------------
@@ -405,12 +422,12 @@ int main()
         d.width = 5;
         d.height = 4;
         std::string e2;
-        if (!psd::write_file("/tmp/psd_nolayers.psd", d, e2)) {
+        if (!psd::write_file(tmp_file("psd_nolayers.psd"), d, e2)) {
             printf("NOLAYER WRITE FAILED: %s\n", e2.c_str());
             return 1;
         }
         psd::Document r;
-        if (!psd::read_file("/tmp/psd_nolayers.psd", r, e2)) {
+        if (!psd::read_file(tmp_file("psd_nolayers.psd"), r, e2)) {
             printf("NOLAYER READ FAILED: %s\n", e2.c_str());
             return 1;
         }
@@ -424,7 +441,7 @@ int main()
         bad.width = 0;
         bad.height = 10;
         std::string e2;
-        CHECK(!psd::write_file("/tmp/psd_bad.psd", bad, e2), "zero-width document accepted");
+        CHECK(!psd::write_file(tmp_file("psd_bad.psd"), bad, e2), "zero-width document accepted");
         bad.width = 4;
         bad.height = 4;
         psd::Layer L;
@@ -433,14 +450,14 @@ int main()
         L.right = 4;
         L.bottom = 4; // claims pixels ...
         bad.layers.push_back(L); // ... but carries none
-        std::remove("/tmp/psd_bad.psd");
-        CHECK(!psd::write_file("/tmp/psd_bad.psd", bad, e2), "layer without pixels accepted");
-        FILE *f = std::fopen("/tmp/psd_bad.psd", "rb");
+        std::remove(tmp_file("psd_bad.psd").c_str());
+        CHECK(!psd::write_file(tmp_file("psd_bad.psd"), bad, e2), "layer without pixels accepted");
+        FILE *f = std::fopen(tmp_file("psd_bad.psd").c_str(), "rb");
         CHECK(f == nullptr, "failed write created a file");
         if (f != nullptr)
             std::fclose(f);
         psd::Document r;
-        CHECK(!psd::read_file("/tmp/psd_does_not_exist.psd", r, e2), "missing file accepted");
+        CHECK(!psd::read_file(tmp_file("psd_does_not_exist.psd"), r, e2), "missing file accepted");
         const uint8_t junk[4] = {'N', 'O', 'P', 'E'};
         CHECK(!psd::read_memory(junk, sizeof junk, r, e2), "junk buffer accepted");
         CHECK(!psd::read_memory(nullptr, 0, r, e2), "empty buffer accepted");

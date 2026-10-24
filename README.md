@@ -177,6 +177,9 @@ Windows 端已验证（便携版 OBS 32.2.2，Windows 11）：
   缺失字体 `ShanghaiFace-Zen-BoldGB2.0` 自动回退到 `Microsoft YaHei UI` 并记录；
   导出 15 层 → `verify_psd.py` 校验通过；重启后场景与图层仍在。
 * `红蓝测试图.psd`：2 图层往返正常。
+* PSD 编解码测试在 MSVC 下同样通过：`ROUND TRIP OK (154 checks)`、
+  `verify_psd.py` 独立校验、3000 次 fuzz 冒烟（0 crash / 0 hang）。
+  （测试的临时文件路径已改为 `%TEMP%`，不再硬编码 `/tmp`。）
 
 #### Windows 端顺带修掉的问题
 
