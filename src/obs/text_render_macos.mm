@@ -113,6 +113,27 @@ std::string font_family(const std::string &font)
 	return out;
 }
 
+std::string font_style(const std::string &font)
+{
+	if (font.empty())
+		return "Regular";
+	// Derive from the PostScript name: faces report trailing tokens such as
+	// "-Bold", "-Regular", "Bold", "Italic". Fall back to Regular.
+	std::string tail = font;
+	const size_t dash = tail.rfind('-');
+	if (dash != std::string::npos)
+		tail = tail.substr(dash + 1);
+	if (tail.find("Bold") != std::string::npos)
+		return "Bold";
+	if (tail.find("Italic") != std::string::npos)
+		return "Italic";
+	if (tail.find("Light") != std::string::npos)
+		return "Light";
+	if (tail.find("Medium") != std::string::npos)
+		return "Medium";
+	return "Regular";
+}
+
 bool render_text_layer(const TextRenderRequest &req, TextRenderResult &out)
 {
 	out = TextRenderResult();

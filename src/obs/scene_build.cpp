@@ -359,8 +359,12 @@ obs_source_t *create_obs_text_source(BuildState &st, const psd::Layer &layer, do
 
 	obs_data_set_string(settings, "font", family.c_str());
 	obs_data_set_string(settings, "face", family.c_str());
-	obs_data_set_string(settings, "style", "Regular");
+	// Use the style the font actually provides ("Bold" for a Bold face); a style
+	// the face does not have leaves the source unable to build a glyph cache.
+	obs_data_set_string(settings, "style", psd::font_style(layer.text_font).c_str());
 	obs_data_set_bool(settings, "use_color", true);
+	obs_data_set_string(settings, "text_file", "");
+	obs_data_set_int(settings, "custom_width", layer.width() > 0 ? layer.width() : 1000);
 
 	// PSD point sizes are em sizes; 0.7 matches the glyph height ratio used by
 	// the bitmap renderer.
