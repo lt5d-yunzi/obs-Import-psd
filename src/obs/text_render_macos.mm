@@ -345,10 +345,7 @@ bool render_text_layer(const TextRenderRequest &req, TextRenderResult &out)
 			const unsigned sa = dilated[i];
 			const unsigned fa = out.rgba[i * 4 + 3];
 			// Stroke first, then the filled glyph over it (both straight alpha).
-			unsigned ar = sa * sc[3] / 255u;
-			unsigned ag = sa * sc[3] / 255u;
-			unsigned ab = sa * sc[3] / 255u;
-			unsigned aa = sa * sc[3] / 255u;
+			const unsigned aa = sa * sc[3] / 255u;
 			unsigned br = out.rgba[i * 4 + 0];
 			unsigned bg = out.rgba[i * 4 + 1];
 			unsigned bb = out.rgba[i * 4 + 2];

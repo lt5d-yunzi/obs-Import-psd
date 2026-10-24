@@ -107,7 +107,7 @@ void run_import_dialog()
                                         .arg(c.lightness() > 128 ? "black" : "white"));
     };
     set_button_color(text_color);
-    QObject::connect(color_button, &QPushButton::clicked, &dlg, [&, color_button]() {
+    QObject::connect(color_button, &QPushButton::clicked, &dlg, [&]() {
         const QColor picked = QColorDialog::getColor(text_color, &dlg, QObject::tr("Text colour"));
         if (picked.isValid()) {
             text_color = picked;
@@ -134,7 +134,7 @@ void run_import_dialog()
                                                .arg(c.lightness() > 128 ? "black" : "white"));
     };
     set_stroke_button_color(stroke_color);
-    QObject::connect(stroke_color_button, &QPushButton::clicked, &dlg, [&, stroke_color_button]() {
+    QObject::connect(stroke_color_button, &QPushButton::clicked, &dlg, [&]() {
         const QColor picked = QColorDialog::getColor(stroke_color, &dlg, QObject::tr("Stroke colour"));
         if (picked.isValid()) {
             stroke_color = picked;
