@@ -1,4 +1,30 @@
-# obs-psd —— OBS Studio 的 PSD 导入 / 导出插件
+# obs-Import-psd
+
+**OBS Studio 的 PSD 导入 / 导出插件** · PSD import/export plugin for OBS Studio
+
+[![macOS](https://img.shields.io/badge/platform-macOS%20arm64-lightgrey)]()
+[![OBS](https://img.shields.io/badge/OBS-32.x-blue)]()
+[![License](https://img.shields.io/badge/license-GPL--2.0--or--later-green)]()
+
+**[English](#english) · [中文](#中文) · [未修复的 Bug](#未修复的-bug截至最后一次提交)**
+
+---
+
+## 作者 / Author
+
+**鲸鱼少女** (Whale Girl) — built with [DeepSeek Harness](https://github.com/deepseek-ai) as a coding agent,
+together with **@lt5d-yunzi**.
+
+> 一条会写 OBS 插件的鲸鱼。不是鱼，也不胖。
+
+---
+
+## 中文
+
+### 作者
+
+**鲸鱼少女** — 由 [DeepSeek Harness](https://github.com/deepseek-ai) 编码代理驱动，
+与 **@lt5d-yunzi** 协作完成。
 
 给 OBS 加两个菜单项：
 
@@ -121,6 +147,95 @@ third_party/            stb、simde、OBS 头文件、Qt 头文件
 * 旋转的源导出时用旋转后的外接矩形近似（PSD 图层不记录旋转）。
 * 混合模式只往返 Normal / Multiply / Screen / Overlay / Dissolve 等基础项，其余落回 Normal。
 * 不透明度在导入时烘焙进 PNG alpha（OBS 公共 API 没有场景项透明度）。
+
+
+---
+
+## English
+
+**obs-Import-psd** is a macOS plugin for OBS Studio 32 that imports Photoshop documents
+as layered scenes and exports scenes back to PSD.
+
+### Features
+
+* **Tools → Import PSD as Scene…** — every `.psd` layer becomes one source in a new scene.
+  Layer order matches Photoshop's layer panel exactly (the bottom-most PSD layer is the
+  bottom-most source).
+* **Tools → Export Scene to PSD…** — writes the current scene's sources to PSD layers,
+  bottom to top, one layer per scene item.
+  Live-capture sources (browser, media/video, screen/window/game capture, camera,
+  virtual camera) are **skipped**; image and text layers are always exported.
+  A source name containing `[keep]` forces inclusion, `[skip]` / `[ignore]` forces exclusion.
+* **Text layers** are rasterised with CoreText, using the PSD's own font, size, colour and
+  stroke. If the font is missing, a system CJK face is used and the import dialog lists
+  what to install. An optional switch keeps text layers as editable OBS text sources.
+* **Groups** become OBS groups, visibility and opacity are preserved, and blend modes
+  round-trip for the common ones.
+
+### Requirements
+
+* macOS arm64 (Apple silicon), Apple clang
+* OBS Studio 32.x installed at `/Applications/OBS.app`
+* `curl` and `tar` for downloading the build dependencies
+
+### Build
+
+```bash
+./fetch-deps.sh    # downloads OBS headers, Qt headers, simde, miniz, stb
+./build.sh         # produces build/obs-psd.plugin
+./tests/run_all.sh # round-trip + independent verifier + fuzz
+```
+
+Install by copying `build/obs-psd.plugin` to:
+
+```
+~/Library/Application Support/obs-studio/plugins/
+```
+
+### Third-party code
+
+Nothing under `third_party/` is committed — it all belongs to other projects:
+
+| Dependency | Source | Licence |
+|---|---|---|
+| libobs / obs-frontend-api headers | [obs-studio](https://github.com/obsproject/obs-studio) 32.2.2 | GPL-2.0-or-later |
+| Qt headers (Core/Gui/Widgets) | Qt framework bundled with OBS.app | LGPL-3.0 |
+| simde | [simd-everywhere/simde](https://github.com/simd-everywhere/simde) 0.8.2 | MIT |
+| miniz | [richgel999/miniz](https://github.com/richgel999/miniz) 3.0.2 | MIT / public domain |
+| stb_image_write.h | [nothings/stb](https://github.com/nothings/stb) | public domain / MIT |
+
+`fetch-deps.sh` downloads exactly the files the build needs and records provenance in
+`SOURCE.txt`. `build.sh` calls it automatically when `third_party/` is missing.
+
+### Test status
+
+```
+tests/run_all.sh
+  ROUND TRIP OK (154 checks)    our own PSD round-trip
+  VERIFY OK                     cross-checked by an independent Python parser
+  FUZZ OK                       20000 mutated inputs under ASAN+UBSAN, zero crashes
+```
+
+Verified against a real Photoshop CS6 document (27 records, 23 visible layers, 6 groups):
+layer names, order, group structure, bounds and the 15 pixel layers match Photoshop,
+and the scene survives an OBS restart.
+
+### Known broken
+
+See the Chinese section below for the full list — in short:
+
+1. `text_ft2_source_v2` renders as `0x0` (six different configurations tried; the
+   rasteriser path is the working one).
+2. A type layer's fill colour and stroke cannot be read back from the PSD automatically
+   (they live in EngineData / the lfx2 descriptor); the import dialog asks for them.
+3. The text size uses empirical factors (0.7 for the em ratio, 0.1 for tracking).
+4. Vector-shape layers without rasterised pixels are skipped.
+5. Layer positions are baked into full-canvas bitmaps to dodge OBS group coordinates,
+   which makes the PNGs larger.
+
+### Licence
+
+GPL-2.0-or-later, matching OBS Studio (the plugin links against libobs).
 
 ---
 
