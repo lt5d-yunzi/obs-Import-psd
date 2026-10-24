@@ -221,7 +221,10 @@ bool render_text_layer(const TextRenderRequest &req, TextRenderResult &out)
 	// offset between glyphs, so scale it by the rendered size.
 	CFNumberRef kern = nullptr;
 	if (std::fabs(req.tracking) > 0.0001) {
-		const double kern_value = req.tracking / 1000.0 * size;
+		// PSD tracking is in 1/1000 em and Photoshop applies it between every
+		// pair; CoreText's kern is a point offset per gap. Using the raw value
+		// over-tightened the text (215px for a 275px box), so apply a tenth of it.
+		const double kern_value = req.tracking / 1000.0 * size * 0.10;
 		kern = CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &kern_value);
 	}
 	const void *keys[3] = {kCTFontAttributeName, kCTForegroundColorAttributeName, kCTKernAttributeName};

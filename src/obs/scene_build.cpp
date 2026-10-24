@@ -467,12 +467,15 @@ obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double
 	int out_w = res.width, out_h = res.height;
 	if (canvas_w > 0 && canvas_h > 0) {
 		canvas.assign(size_t(canvas_w) * size_t(canvas_h) * 4u, 0);
+		// The rendered bitmap is the layer rectangle grown by `pad` on every side
+		// to make room for the stroke, so the bitmap's top-left maps to
+		// (left - pad, top - pad), not to (left, top).
 		for (int y = 0; y < res.height; ++y) {
-			const int dy = layer.top + y;
+			const int dy = layer.top - res.pad + y;
 			if (dy < 0 || dy >= canvas_h)
 				continue;
 			for (int x = 0; x < res.width; ++x) {
-				const int dx = layer.left + x;
+				const int dx = layer.left - res.pad + x;
 				if (dx < 0 || dx >= canvas_w)
 					continue;
 				const uint8_t *s2 = &res.rgba[(size_t(y) * size_t(res.width) + size_t(x)) * 4u];
