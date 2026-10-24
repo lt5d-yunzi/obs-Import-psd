@@ -387,14 +387,21 @@ obs_source_t *create_obs_text_source(BuildState &st, const psd::Layer &layer, do
 	obs_data_set_int(settings, "antialiasing", 1);
 	obs_data_set_int(settings, "log_mode", 0);
 
-	obs_source_t *src = obs_source_create("text_ft2_source_v2", layer.name.c_str(), settings, nullptr);
-	obs_data_release(settings);
+	// Create the source first and then apply the settings, which is exactly what
+	// the OBS UI does. text_ft2_source_v2 builds its glyph cache in
+	// update(), and a source created with settings in one shot can end up with
+	// an empty cache here (the source rendered nothing at all).
+	obs_source_t *src = obs_source_create("text_ft2_source_v2", layer.name.c_str(), nullptr, nullptr);
 	if (!src) {
+		obs_data_release(settings);
 		st.err = "could not create text_ft2_source_v2 for layer '" + layer.name + "'";
 		return nullptr;
 	}
-	blog(LOG_INFO, "[obs-psd] OBS text source '%s' text='%s' size=%d font='%s'", layer.name.c_str(),
-	     layer.text.c_str(), int(px), font.c_str());
+	obs_source_update(src, settings);
+	obs_data_release(settings);
+
+	blog(LOG_INFO, "[obs-psd] OBS text source '%s' '%s' size=%lld -> %ux%u", layer.name.c_str(),
+	     layer.text.c_str(), (long long)px, obs_source_get_width(src), obs_source_get_height(src));
 	st.images.push_back(src);
 	return src;
 }
