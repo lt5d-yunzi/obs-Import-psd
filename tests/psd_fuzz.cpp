@@ -39,10 +39,13 @@ static std::vector<uint8_t> read_file_bytes(const char *path)
 
 int main(int argc, char **argv)
 {
+    const char *tmp_base = std::getenv("PSD_TEST_TMPDIR");
 #ifdef _WIN32
-    const char *tmp_base = std::getenv("TEMP");
+    if (!tmp_base || !*tmp_base)
+        tmp_base = std::getenv("TEMP");
 #else
-    const char *tmp_base = std::getenv("TMPDIR");
+    if (!tmp_base || !*tmp_base)
+        tmp_base = "/tmp";
 #endif
     if (!tmp_base || !*tmp_base)
         tmp_base = ".";

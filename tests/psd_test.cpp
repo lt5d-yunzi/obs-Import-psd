@@ -30,18 +30,20 @@
 #include <vector>
 
 // Tests write their scratch files into a temporary directory.  "/tmp" does not
-// exist on Windows, so use %TEMP% there and $TMPDIR (or /tmp) elsewhere.
+// exist on Windows, so use %TEMP% there; POSIX keeps /tmp.  tests/run_all.sh
+// exports PSD_TEST_TMPDIR so the verifier and the fuzzer agree on the paths.
 static std::string tmp_file(const char *name)
 {
+    const char *base = std::getenv("PSD_TEST_TMPDIR");
 #ifdef _WIN32
-    const char *base = std::getenv("TEMP");
     if (!base || !*base)
-        base = ".";
+        base = std::getenv("TEMP");
 #else
-    const char *base = std::getenv("TMPDIR");
     if (!base || !*base)
         base = "/tmp";
 #endif
+    if (!base || !*base)
+        base = ".";
     return std::string(base) + "/" + name;
 }
 
