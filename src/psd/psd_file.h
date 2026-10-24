@@ -13,6 +13,14 @@
 #include <string>
 
 #ifdef _WIN32
+// Keep the Windows headers from defining min()/max() macros (they break
+// std::min/std::max in the codec and in every consumer of this header).
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #endif
 
