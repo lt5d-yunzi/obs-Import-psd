@@ -37,6 +37,10 @@ struct SceneBuildOptions {
 	double text_stroke_width = 16.0;              // px at 100pt
 	double text_stroke_color[4] = {1, 1, 1, 1};
 
+	// Force every type layer to become an editable OBS text source instead of a
+	// rendered bitmap, even when the PSD font is installed.
+	bool text_force_obs_source = false;
+
 	// Milliseconds to wait for image_source textures to load before the scene
 	// is declared usable.  0 = do not wait (caller then owns the wait via
 	// wait_scene_images_loaded()).

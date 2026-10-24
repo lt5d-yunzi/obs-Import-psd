@@ -336,6 +336,7 @@ struct BuildState {
 	double text_stroke_width = 16.0;
 	double text_stroke_color[4] = {1, 1, 1, 1};
 	std::vector<MissingFont> missing_fonts;
+	bool text_force_obs_source = false;
 };
 
 // Builds a plain OBS text source for a PSD type layer. Used when the PSD's font
@@ -396,7 +397,9 @@ obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double
 	// for an OBS text source instead of a rendered bitmap: it stays editable and
 	// OBS provides a font it can actually display.
 	const bool psd_font_ok = layer.text_font.empty() || psd::font_is_usable(layer.text_font);
-	if (!psd_font_ok) {
+	if (st.text_force_obs_source || !psd_font_ok) {
+		if (st.text_force_obs_source && psd_font_ok)
+			blog(LOG_INFO, "[obs-psd] layer '%s' forced to an OBS text source", layer.name.c_str());
 		blog(LOG_WARNING,
 		     "[obs-psd] layer '%s' uses font '%s' which is not installed; using an OBS text source "
 		     "(install the font and re-import to keep the original styling)",
@@ -682,6 +685,7 @@ bool build_scene_from_psd(const psd::Document &doc, const char *scene_name, std:
 	}
 	st.text_stroke = options.text_stroke;
 	st.text_stroke_width = options.text_stroke_width;
+	st.text_force_obs_source = options.text_force_obs_source;
 	const Placement p = compute_placement(doc, options.placement);
 
 	// Public scene (NOT private): obs_scene_create() inserts the scene source into

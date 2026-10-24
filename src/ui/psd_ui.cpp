@@ -143,6 +143,12 @@ void run_import_dialog()
     });
     text_form->addRow(QObject::tr("Stroke colour"), stroke_color_button);
 
+    auto *obs_text_check = new QCheckBox(QObject::tr("Always use OBS text sources"), text_group);
+    obs_text_check->setToolTip(QObject::tr(
+        "Type layers become editable OBS text sources instead of rendered images. "
+        "Useful when the PSD font is missing or you want to edit the text in OBS."));
+    text_form->addRow(QString(), obs_text_check);
+
     if (text_layers > 0)
         layout->addWidget(text_group);
 
@@ -170,6 +176,7 @@ void run_import_dialog()
         opts.text_stroke_color[1] = stroke_color.greenF();
         opts.text_stroke_color[2] = stroke_color.blueF();
         opts.text_stroke_color[3] = 1.0;
+        opts.text_force_obs_source = obs_text_check->isChecked();
     }
     std::string build_err;
     obs_source_t *scene_src = nullptr;
