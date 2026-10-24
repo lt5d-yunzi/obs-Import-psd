@@ -711,6 +711,7 @@ bool parse_layers(const uint8_t *buf, size_t buf_len, int color_mode, uint64_t m
                         L.text = ts.text;
                         L.text_font = ts.font;
                         L.text_size = ts.font_size;
+                        L.text_tracking = ts.tracking;
                         for (int ci = 0; ci < 4; ++ci)
                             L.text_color[ci] = ts.color[ci];
                     }

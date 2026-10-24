@@ -24,6 +24,7 @@ struct TextStyle {
 	double font_size = 0; // points, as stored by Photoshop
 	double color[4] = {0, 0, 0, 1}; // RGBA, 0..1
 	int justification = 0; // 0 = left, 1 = right, 2 = centre
+	double tracking = 0;   // 1/1000 em
 	bool valid = false;
 };
 

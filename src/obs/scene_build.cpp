@@ -386,6 +386,7 @@ obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double
 	for (int i = 0; i < 4; ++i)
 		req.color[i] = st.text_style_valid ? st.text_color[i] : layer.text_color[i];
 	req.justification = 0;
+	req.tracking = layer.text_tracking;
 	req.width = layer.width();
 	req.height = layer.height();
 	req.stroke = st.text_style_valid ? st.text_stroke : layer.stroke_on;

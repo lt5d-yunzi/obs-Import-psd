@@ -315,6 +315,12 @@ bool parse_engine_data(const uint8_t *data, size_t size, TextStyle &out)
 				out.font_size = v;
 			continue;
 		}
+		if (key == "Tracking") {
+			double v = 0;
+			if (read_number(c, v) && out.tracking == 0)
+				out.tracking = v;
+			continue;
+		}
 		if (key == "Justification") {
 			double v = 0;
 			if (read_number(c, v))

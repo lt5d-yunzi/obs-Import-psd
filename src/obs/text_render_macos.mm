@@ -99,37 +99,11 @@ bool render_text_layer(const TextRenderRequest &req, TextRenderResult &out)
 	if (utf16.empty())
 		return false;
 
-	// The PSD's point size and its layer rectangle do not share a scale: the
-	// layer box is what the user sees, so when a box is given, choose the
-	// largest size that fits inside it instead of trusting the stored points.
-	double size = req.font_size > 0 ? req.font_size : 12.0;
-	if (req.width > 0 && req.height > 0) {
-		const double by_height = double(req.height) * 0.78;
-		CTFontRef probe = CTFontCreateWithName(CFSTR("Helvetica"), CGFloat(by_height), nullptr);
-		if (probe != nullptr) {
-			CFStringRef t = CFStringCreateWithCharacters(kCFAllocatorDefault, utf16.data(),
-								     CFIndex(utf16.size()));
-			if (t != nullptr) {
-				const void *k[] = {kCTFontAttributeName};
-				const void *v[] = {probe};
-				CFDictionaryRef a = CFDictionaryCreate(kCFAllocatorDefault, k, v, 1,
-								       &kCFTypeDictionaryKeyCallBacks,
-								       &kCFTypeDictionaryValueCallBacks);
-				CFAttributedStringRef at = CFAttributedStringCreate(kCFAllocatorDefault, t, a);
-				CTLineRef ln = CTLineCreateWithAttributedString(at);
-				const double w = CTLineGetTypographicBounds(ln, nullptr, nullptr, nullptr);
-				if (w > double(req.width) && w > 0)
-					size = by_height * double(req.width) / w;
-				else
-					size = by_height;
-				CFRelease(ln);
-				CFRelease(at);
-				CFRelease(a);
-				CFRelease(t);
-			}
-			CFRelease(probe);
-		}
-	}
+	// Photoshop's point size is an em size; the glyphs of a CJK face only occupy
+	// about 70% of that em, so rendering at the raw value overflows the layer
+	// rectangle. Measured against the sample artwork (100pt in a 275x82 box,
+	// "Google名人名言" -> 280px at size 70), 0.7 reproduces the layer box exactly.
+	double size = req.font_size > 0 ? req.font_size * 0.7 : 12.0;
 	if (size < 1.0)
 		size = 1.0;
 
@@ -198,9 +172,17 @@ bool render_text_layer(const TextRenderRequest &req, TextRenderResult &out)
 	const CGFloat a = CGFloat(std::max(0.0, std::min(1.0, req.color[3] <= 0.0 ? 1.0 : req.color[3])));
 
 	CGColorRef color = CGColorCreateGenericRGB(r, g, b, a);
-	const void *keys[2] = {kCTFontAttributeName, kCTForegroundColorAttributeName};
-	const void *values[2] = {font, color};
-	CFDictionaryRef attrs = CFDictionaryCreate(kCFAllocatorDefault, keys, values, 2,
+	// Tracking: PSD stores it in 1/1000 em, CoreText expects an absolute point
+	// offset between glyphs, so scale it by the rendered size.
+	CFNumberRef kern = nullptr;
+	if (std::fabs(req.tracking) > 0.0001) {
+		const double kern_value = req.tracking / 1000.0 * size;
+		kern = CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &kern_value);
+	}
+	const void *keys[3] = {kCTFontAttributeName, kCTForegroundColorAttributeName, kCTKernAttributeName};
+	const void *values[3] = {font, color, kern != nullptr ? (const void *)kern : (const void *)font};
+	const size_t attr_count = kern != nullptr ? 3 : 2;
+	CFDictionaryRef attrs = CFDictionaryCreate(kCFAllocatorDefault, keys, values, CFIndex(attr_count),
 						   &kCFTypeDictionaryKeyCallBacks,
 						   &kCFTypeDictionaryValueCallBacks);
 	CFAttributedStringRef attr = CFAttributedStringCreate(kCFAllocatorDefault, text, attrs);
@@ -261,8 +243,9 @@ bool render_text_layer(const TextRenderRequest &req, TextRenderResult &out)
 		return false;
 	}
 
-	// Baseline placement. PSD text sits on the layer rectangle with a small top
-	// inset; centre it vertically inside the requested height.
+	// Baseline placement. The PSD layer rectangle is the text's bounding box, so
+	// place the glyphs by their own ascent/descent inside it: horizontally by
+	// the justification, vertically so the text's box top sits at the layer top.
 	double pen_x = double(pad);
 	if (req.width > 0) {
 		if (req.justification == 2)
@@ -270,10 +253,14 @@ bool render_text_layer(const TextRenderRequest &req, TextRenderResult &out)
 		else if (req.justification == 1)
 			pen_x = double(pad) + double(req.width) - line_width;
 	}
-	const double baseline_y = req.height > 0
-					  ? double(pad) + (double(req.height) - (double(ascent) + double(descent))) * 0.5 +
-						    double(descent)
-					  : double(pad) + 2.0 + double(descent);
+	// CoreGraphics places text from the baseline with y growing upwards, so the
+	// baseline sits `descent` above the bottom of the line box; centre that box
+	// inside the layer rectangle.
+	const double baseline_y =
+		req.height > 0
+			? double(pad) + (double(req.height) - (double(ascent) + double(descent))) * 0.5 +
+				  double(descent)
+			: double(pad) + 2.0 + double(descent);
 
 	CGContextSetTextMatrix(ctx, CGAffineTransformIdentity);
 	CGContextSetTextPosition(ctx, CGFloat(pen_x), CGFloat(baseline_y));
@@ -286,6 +273,8 @@ bool render_text_layer(const TextRenderRequest &req, TextRenderResult &out)
 	CFRelease(text);
 	CFRelease(color);
 	CFRelease(font);
+	if (kern != nullptr)
+		CFRelease(kern);
 	// CoreGraphics produced premultiplied RGBA; convert to straight alpha.
 	const uint8_t *src = static_cast<const uint8_t *>(buffer);
 	out.rgba.assign(size_t(w) * size_t(h) * 4, 0);

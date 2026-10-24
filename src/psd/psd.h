@@ -79,6 +79,7 @@ struct Layer {
     double text_color[4] = {0, 0, 0, 1};
 
     // Layer effects (lfx2) that matter for rendering a type layer.
+    double text_tracking = 0; // 1/1000 em (PSD Tracking)
     bool stroke_on = false;
     double stroke_size = 0;                // px, relative to text_size points
     double stroke_color[4] = {1, 1, 1, 1}; // RGBA 0..1

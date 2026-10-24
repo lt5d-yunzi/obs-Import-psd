@@ -23,6 +23,7 @@ struct TextRenderRequest {
 	double font_size = 100; // points
 	double color[4] = {0, 0, 0, 1}; // RGBA 0..1 straight (non-premultiplied)
 	int justification = 0; // 0 left, 1 right, 2 centre
+	double tracking = 0;   // letter spacing in 1/1000 em (PSD Tracking)
 	int width = 0;         // target bitmap width in px (0 = fit the text)
 	int height = 0;        // target bitmap height in px (0 = fit the text)
 	// Optional stroke (PSD layer effect "Stroke"): outside the glyph outline.
