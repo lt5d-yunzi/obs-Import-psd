@@ -176,10 +176,12 @@ uint32_t psd_text_get_width(void *data)
 void psd_text_video_tick(void *data, float)
 {
 	auto *ctx = static_cast<PsdText *>(data);
-	static bool logged = false;
-	if (!logged && ctx->texture != nullptr) {
-		blog(LOG_INFO, "[obs-psd-text] texture %ux%u ready", ctx->width, ctx->height);
-		logged = true;
+	if (ctx->dirty) {
+		std::lock_guard<std::mutex> lock(g_tex_mutex);
+		rasterise(ctx);
+		rebuild_texture(ctx);
+		blog(LOG_INFO, "[obs-psd-text] tick built texture %ux%u (tex=%p)", ctx->width, ctx->height,
+		     (void *)ctx->texture);
 	}
 }
 
@@ -220,12 +222,10 @@ void psd_text_video_render(void *data, gs_effect_t *)
 	}
 	if (ctx->texture == nullptr)
 		return;
-	// Explicit dimensions: gs_draw_sprite with 0 does not draw on every backend.
-	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_DEFAULT);
-	gs_eparam_t *image = gs_effect_get_param_by_name(solid, "image");
-	gs_effect_set_texture(image, ctx->texture);
-	while (gs_effect_loop(solid, "Draw"))
-		gs_draw_sprite(ctx->texture, 0, uint32_t(ctx->width), uint32_t(ctx->height));
+	// obs_source_draw() is the documented entry point: it binds the texture and
+	// draws it with the source's own effect handling. drawing manually with
+	// gs_draw_sprite left the source invisible.
+	obs_source_draw(ctx->texture, 0, 0, uint32_t(ctx->width), uint32_t(ctx->height), false);
 }
 
 obs_properties_t *psd_text_get_properties(void *data)
