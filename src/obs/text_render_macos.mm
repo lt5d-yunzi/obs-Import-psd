@@ -113,24 +113,17 @@ std::string font_family(const std::string &font)
 	return out;
 }
 
+bool font_face_and_style(const std::string &font, std::string &face, std::string &style);
+
 std::string font_style(const std::string &font)
 {
-	if (font.empty())
-		return "Regular";
-	// Derive from the PostScript name: faces report trailing tokens such as
-	// "-Bold", "-Regular", "Bold", "Italic". Fall back to Regular.
-	std::string tail = font;
-	const size_t dash = tail.rfind('-');
-	if (dash != std::string::npos)
-		tail = tail.substr(dash + 1);
-	if (tail.find("Bold") != std::string::npos)
-		return "Bold";
-	if (tail.find("Italic") != std::string::npos)
-		return "Italic";
-	if (tail.find("Light") != std::string::npos)
-		return "Light";
-	if (tail.find("Medium") != std::string::npos)
-		return "Medium";
+	// Ask the font manager instead of guessing from the name: a family called
+	// "ShanghaiFace-Zen-BoldGB2.0" exposes its single face with the style
+	// "Regular", so looking for "Bold" in the PostScript name is wrong and left
+	// OBS' text source unable to resolve the face.
+	std::string face, style;
+	if (font_face_and_style(font, face, style))
+		return style;
 	return "Regular";
 }
 

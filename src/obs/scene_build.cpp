@@ -460,12 +460,8 @@ obs_source_t *create_obs_text_source(BuildState &st, const psd::Layer &layer, do
 	obs_data_set_obj(settings, "font", font_obj);
 	obs_data_release(font_obj);
 
-	obs_data_set_string(settings, "face", family.c_str());
-	obs_data_set_string(settings, "style", style.c_str());
-	obs_data_set_int(settings, "size", size_px);
-	obs_data_set_bool(settings, "use_color", true);
-	obs_data_set_string(settings, "text_file", "");
-	obs_data_set_int(settings, "custom_width", layer.width() > 0 ? layer.width() : 1000);
+	// Only the keys the OBS UI itself writes. Mirroring the nested object and
+	// leaving the rest at their defaults is what made the hand-made source work.
 
 	// OBS colours are ABGR with the alpha in the high byte.
 	const double *c = st.text_style_valid ? st.text_color : layer.text_color;
@@ -476,11 +472,6 @@ obs_source_t *create_obs_text_source(BuildState &st, const psd::Layer &layer, do
 	obs_data_set_int(settings, "color1", color);
 	obs_data_set_int(settings, "color2", color);
 	obs_data_set_bool(settings, "outline", st.text_style_valid && st.text_stroke);
-	obs_data_set_bool(settings, "drop_shadow", false);
-	obs_data_set_int(settings, "align", OBS_ALIGN_LEFT);
-	obs_data_set_bool(settings, "word_wrap", false);
-	obs_data_set_int(settings, "antialiasing", 1);
-	obs_data_set_int(settings, "log_mode", 0);	obs_data_set_int(settings, "log_mode", 0);
 
 	// Create the source first and then apply the settings, which is exactly what
 	// the OBS UI does. text_ft2_source_v2 builds its glyph cache in
