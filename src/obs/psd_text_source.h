@@ -12,6 +12,8 @@
 
 #include <string>
 
+struct obs_source;
+
 namespace obspsd {
 
 // Registers the source type. Call from obs_module_load().
@@ -19,5 +21,9 @@ void register_psd_text_source();
 
 // The source type id, also used as the "unversioned" id in scene files.
 constexpr const char *kPsdTextSourceId = "obs_psd_text_source";
+
+// Document offset stored on a text source by the PSD import. Returns false when
+// `source` is not one of ours.
+bool psd_text_source_offset(struct obs_source *source, int &x, int &y);
 
 } // namespace obspsd

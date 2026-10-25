@@ -92,6 +92,7 @@
 // =============================================================================
 
 #include "scene_build.h"
+#include "psd_text_source.h"
 #include "obs/text_render.h"
 #include "../psd/psd_file.h"
 
@@ -379,16 +380,22 @@ Placement compute_placement(const psd::Document &doc, SceneBuildOptions::Placeme
 
 void place_item(obs_sceneitem_t *item, const psd::Layer &layer, const Placement &p)
 {
-	// Layers are written as full-canvas images (see write_layer_png), so the
-	// item's own position inside its image is already correct: pin it to the
-	// canvas origin and only apply the document->canvas scale. This avoids every
-	// per-item coordinate computation OBS performs for partial images.
-	(void)layer;
 	obs_sceneitem_set_alignment(item, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
 	obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_NONE);
 
 	struct vec2 pos;
-	vec2_set(&pos, 0.0f, 0.0f);
+	// Image layers are written as full-canvas bitmaps (see write_layer_png), so
+	// their content already carries the document offset and the item sits at the
+	// canvas origin. A PSD text source only rasterises the glyphs, so its item
+	// has to be placed at the layer rectangle's position instead.
+	obs_source_t *src = obs_sceneitem_get_source(item);
+	int text_x = 0, text_y = 0;
+	if (obspsd::psd_text_source_offset(src, text_x, text_y)) {
+		vec2_set(&pos, (float)(p.origin_x + double(text_x) * p.fit),
+			 (float)(p.origin_y + double(text_y) * p.fit));
+	} else {
+		vec2_set(&pos, 0.0f, 0.0f);
+	}
 	obs_sceneitem_set_pos(item, &pos);
 
 	struct vec2 scale;
@@ -446,6 +453,10 @@ obs_source_t *create_psd_text_source(BuildState &st, const psd::Layer &layer)
 			    st.text_style_valid ? st.text_stroke_width : layer.stroke_size);
 	obs_data_set_int(settings, "stroke_color",
 			 pack(st.text_style_valid ? st.text_stroke_color : layer.stroke_color));
+	// The source renders only the glyphs; the document position is stored so
+	// place_item() can put the scene item at the right spot on the canvas.
+	obs_data_set_int(settings, "offset_x", layer.left);
+	obs_data_set_int(settings, "offset_y", layer.top);
 
 	obs_source_t *src = obs_source_create("obs_psd_text_source", layer.name.c_str(), settings, nullptr);
 	obs_data_release(settings);

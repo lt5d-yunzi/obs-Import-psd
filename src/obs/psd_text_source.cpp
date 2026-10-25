@@ -25,6 +25,8 @@ struct PsdText {
 	double stroke_width = 0.0;
 	uint32_t stroke_color = 0xFFFFFFFF;
 	int align = 0;                    // 0 left, 1 right, 2 centre
+	int offset_x = 0;                 // document position of the layer rect
+	int offset_y = 0;
 
 	// Rasterised bitmap plus the texture built from it.
 	std::vector<uint8_t> rgba;        // straight alpha, width*height*4
@@ -114,6 +116,7 @@ const char *psd_text_get_name(void *)
 
 void psd_text_apply_settings(PsdText *ctx, obs_data_t *settings)
 {
+	ctx->dirty = true;
 	const char *text = obs_data_get_string(settings, "text");
 	const char *font = obs_data_get_string(settings, "font");
 	ctx->text = text ? text : "";
@@ -124,7 +127,8 @@ void psd_text_apply_settings(PsdText *ctx, obs_data_t *settings)
 	ctx->stroke_width = obs_data_get_double(settings, "stroke_width");
 	ctx->stroke_color = uint32_t(obs_data_get_int(settings, "stroke_color"));
 	ctx->align = int(obs_data_get_int(settings, "align"));
-	ctx->dirty = true;
+	ctx->offset_x = int(obs_data_get_int(settings, "offset_x"));
+	ctx->offset_y = int(obs_data_get_int(settings, "offset_y"));
 }
 
 void *psd_text_create(obs_data_t *settings, obs_source_t *source)
@@ -226,6 +230,8 @@ void psd_text_get_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, "stroke_width", 16.0);
 	obs_data_set_default_int(settings, "stroke_color", 0xFFFFFFFF);
 	obs_data_set_default_int(settings, "align", 0);
+	obs_data_set_default_int(settings, "offset_x", 0);
+	obs_data_set_default_int(settings, "offset_y", 0);
 }
 
 void psd_text_activate(void *data)
@@ -292,6 +298,19 @@ const obs_source_info kPsdTextInfo = [] {
 void register_psd_text_source()
 {
 	obs_register_source(&kPsdTextInfo);
+}
+
+// Reads the document offset a PSD import stored on a text source instance.
+bool psd_text_source_offset(struct obs_source *source, int &x, int &y)
+{
+	if (source == nullptr || obs_source_get_id(source) == nullptr ||
+	    std::strcmp(obs_source_get_id(source), kPsdTextSourceId) != 0)
+		return false;
+	obs_data_t *settings = obs_source_get_settings(source);
+	x = int(obs_data_get_int(settings, "offset_x"));
+	y = int(obs_data_get_int(settings, "offset_y"));
+	obs_data_release(settings);
+	return true;
 }
 
 } // namespace obspsd
