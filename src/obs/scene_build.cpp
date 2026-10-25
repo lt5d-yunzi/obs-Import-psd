@@ -424,6 +424,42 @@ struct BuildState {
 	bool text_force_obs_source = false;
 };
 
+// Builds an editable obs_psd_text_source for a PSD type layer.
+obs_source_t *create_psd_text_source(BuildState &st, const psd::Layer &layer)
+{
+	obs_data_t *settings = obs_data_create();
+	obs_data_set_string(settings, "text", layer.text.c_str());
+	obs_data_set_string(settings, "font", layer.text_font.c_str());
+	obs_data_set_double(settings, "size",
+			    layer.text_size > 0 ? layer.text_size : 100.0);
+	const double *c = st.text_style_valid ? st.text_color : layer.text_color;
+	auto pack = [](const double rgba[4]) {
+		const uint32_t r = uint32_t(std::max(0.0, std::min(1.0, rgba[0])) * 255.0);
+		const uint32_t g = uint32_t(std::max(0.0, std::min(1.0, rgba[1])) * 255.0);
+		const uint32_t b = uint32_t(std::max(0.0, std::min(1.0, rgba[2])) * 255.0);
+		const uint32_t a = uint32_t(std::max(0.0, std::min(1.0, rgba[3])) * 255.0);
+		return (a << 24) | (r << 16) | (g << 8) | b;
+	};
+	obs_data_set_int(settings, "color1", pack(c));
+	obs_data_set_bool(settings, "stroke", st.text_style_valid ? st.text_stroke : layer.stroke_on);
+	obs_data_set_double(settings, "stroke_width",
+			    st.text_style_valid ? st.text_stroke_width : layer.stroke_size);
+	obs_data_set_int(settings, "stroke_color",
+			 pack(st.text_style_valid ? st.text_stroke_color : layer.stroke_color));
+
+	obs_source_t *src = obs_source_create("obs_psd_text_source", layer.name.c_str(), settings, nullptr);
+	obs_data_release(settings);
+	if (!src) {
+		blog(LOG_WARNING, "[obs-psd] could not create obs_psd_text_source for '%s'",
+		     layer.name.c_str());
+		return nullptr;
+	}
+	st.images.push_back(src);
+	blog(LOG_INFO, "[obs-psd] text layer '%s' -> editable PSD text source (%ux%u)", layer.name.c_str(),
+	     obs_source_get_width(src), obs_source_get_height(src));
+	return src;
+}
+
 // Builds a plain OBS text source for a PSD type layer. Used when the PSD's font
 // is not installed: OBS picks a font it can actually render (and the user can
 // edit the text, font and colour directly in OBS), instead of our renderer
@@ -517,21 +553,13 @@ obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double
 	// faithful. The user can opt into editable OBS text sources instead; those
 	// only work when the font is present (OBS' text source cannot synthesise a
 	// missing face), so a forced source falls back to the renderer on failure.
-	const bool psd_font_ok = layer.text_font.empty() || psd::font_is_usable(layer.text_font);
-	blog(LOG_INFO, "[obs-psd] layer '%s' font='%s' usable=%d force=%d", layer.name.c_str(),
-	     layer.text_font.c_str(), int(psd_font_ok), int(st.text_force_obs_source));
-	if (st.text_force_obs_source && psd_font_ok) {
-		blog(LOG_INFO, "[obs-psd] layer '%s' forced to an OBS text source", layer.name.c_str());
-		if (obs_source_t *src = create_obs_text_source(st, layer, fit))
+	// Editable text source: our own source type, which rasterises through the
+	// same CoreText path as the bitmap import but keeps text/font/colour/stroke
+	// editable in the source properties. OBS' built-in text source is not used
+	// because it renders 0x0 on macOS for CoreText face names.
+	if (st.text_force_obs_source) {
+		if (obs_source_t *src = create_psd_text_source(st, layer))
 			return src;
-		// Fall through to the renderer if OBS could not create the source.
-	} else if (st.text_force_obs_source) {
-		// OBS' text source cannot synthesise a face it does not have; creating
-		// one would leave an empty 0x0 source on screen. Bitmap path instead.
-		blog(LOG_WARNING,
-		     "[obs-psd] layer '%s' uses font '%s' which is not installed; an OBS text "
-		     "source cannot reproduce it, so the layer is rendered as a bitmap instead",
-		     layer.name.c_str(), layer.text_font.c_str());
 	}
 
 	psd::TextRenderResult res;

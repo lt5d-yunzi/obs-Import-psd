@@ -11,6 +11,7 @@
 #include "obs/obs_include.h"
 
 #include "obs/psd_ignore.h"
+#include "obs/psd_text_source.h"
 #include "psd/psd.h"
 #include "ui/psd_ui.h"
 
@@ -58,6 +59,7 @@ void on_frontend_event(enum obs_frontend_event event, void *)
 bool obs_module_load(void)
 {
     blog(LOG_INFO, "[obs-psd] loaded (PSD import/export)");
+    obspsd::register_psd_text_source();
     obs_frontend_add_event_callback(on_frontend_event, nullptr);
     return true;
 }
