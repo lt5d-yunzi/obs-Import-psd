@@ -64,6 +64,8 @@ void premultiply_into(const std::vector<uint8_t> &straight, std::vector<uint8_t>
 	}
 }
 
+void psd_text_push_frame(PsdText *ctx);
+
 void rasterise(PsdText *ctx)
 {
 	blog(LOG_INFO, "[obs-psd-text] rasterise: text='%s' font='%s' size=%.1f", ctx->text.c_str(),
@@ -136,7 +138,9 @@ void *psd_text_create(obs_data_t *settings, obs_source_t *source)
 	// Rasterise immediately so get_width()/get_height() report the real size
 	// before the first frame is rendered.
 	rasterise(ctx);
-	blog(LOG_INFO, "[obs-psd-text] create: '%s' -> %dx%d", ctx->text.c_str(), ctx->width, ctx->height);
+	psd_text_push_frame(ctx);
+	blog(LOG_INFO, "[obs-psd-text] create: '%s' -> %dx%d id=%s", ctx->text.c_str(), ctx->width,
+	     ctx->height, obs_source_get_id(source));
 	return ctx;
 }
 
@@ -165,15 +169,10 @@ uint32_t psd_text_get_width(void *data)
 // Async video: OBS owns the texture. We hand it one frame per change, which
 // avoids creating GL textures ourselves (gs_texture_create returned NULL for
 // this source in every format) and gets scaling/filters for free.
-void psd_text_video_tick(void *data, float)
+void psd_text_push_frame(PsdText *ctx)
 {
-	auto *ctx = static_cast<PsdText *>(data);
-	if (!ctx->dirty)
-		return;
-	rasterise(ctx);
 	if (ctx->width <= 0 || ctx->height <= 0 || ctx->rgba.empty())
 		return;
-
 	const size_t pixel_bytes = size_t(ctx->width) * size_t(ctx->height) * 4u;
 	if (ctx->frame.data[0] == nullptr || ctx->frame_bytes != pixel_bytes) {
 		free(ctx->frame.data[0]);
@@ -197,6 +196,16 @@ void psd_text_video_tick(void *data, float)
 	ctx->frame.timestamp = 0;
 	obs_source_output_video(ctx->source, &ctx->frame);
 	blog(LOG_INFO, "[obs-psd-text] pushed frame %ux%u", ctx->width, ctx->height);
+	ctx->dirty = false;
+}
+
+void psd_text_video_tick(void *data, float)
+{
+	auto *ctx = static_cast<PsdText *>(data);
+	if (!ctx->dirty)
+		return;
+	rasterise(ctx);
+	psd_text_push_frame(ctx);
 }
 
 uint32_t psd_text_get_height(void *data)
@@ -219,9 +228,24 @@ void psd_text_get_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "align", 0);
 }
 
+void psd_text_activate(void *data)
+{
+	auto *ctx = static_cast<PsdText *>(data);
+	blog(LOG_INFO, "[obs-psd-text] activate '%s'", ctx->text.c_str());
+}
+
+void psd_text_deactivate(void *data)
+{
+	auto *ctx = static_cast<PsdText *>(data);
+	blog(LOG_INFO, "[obs-psd-text] deactivate '%s'", ctx->text.c_str());
+}
+
 void psd_text_update(void *data, obs_data_t *settings)
 {
-	psd_text_apply_settings(static_cast<PsdText *>(data), settings);
+	auto *ctx = static_cast<PsdText *>(data);
+	psd_text_apply_settings(ctx, settings);
+	rasterise(ctx);
+	psd_text_push_frame(ctx);
 }
 
 obs_properties_t *psd_text_get_properties(void *data)
@@ -257,6 +281,8 @@ const obs_source_info kPsdTextInfo = [] {
 	info.get_defaults = psd_text_get_defaults;
 	info.get_properties = psd_text_get_properties;
 	info.update = psd_text_update;
+	info.activate = psd_text_activate;
+	info.deactivate = psd_text_deactivate;
 	info.video_tick = psd_text_video_tick;
 	return info;
 }();
