@@ -54,4 +54,10 @@ std::string font_family(const std::string &font);
 // Style name for a PostScript name ("Bold", "Regular", ...). Empty when unknown.
 std::string font_style(const std::string &font);
 
+// OBS' text sources select a typeface by the font MANAGER's face name (what
+// Cocoa calls [NSFont fontName] / the PostScript name, e.g.
+// "ShanghaiFace-Zen-BoldGB2.0-Regular") plus the manager's style name
+// ("Regular"), NOT the family name. Fills both; returns false when unknown.
+bool font_face_and_style(const std::string &font, std::string &face, std::string &style);
+
 } // namespace psd

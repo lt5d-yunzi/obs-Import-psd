@@ -437,23 +437,20 @@ obs_source_t *create_obs_text_source(BuildState &st, const psd::Layer &layer, do
 	// no glyphs at all (it rendered 0x0). Family names differ from PostScript
 	// names ("PingFang SC" vs "PingFangSC-Semibold"), so map through the family
 	// list of the installed font.
-	// Resolve the PostScript name in the PSD to the FAMILY name OBS wants.
-	std::string family = psd::font_family(layer.text_font);
-	if (family.empty()) {
-		// A PSD may name a font that is not installed at all. Pick a face the
-		// platform's text engine can actually render so the layer is not empty.
-#ifdef _WIN32
-		family = "Microsoft YaHei UI";
-#else
-		family = "PingFang SC";
-#endif
+	// OBS' text source picks a typeface by the font manager's FACE name and STYLE
+	// name (what Cocoa reports as [NSFont fontName] + style), not by the family
+	// name: for the sample font Cocoa reports family
+	// "ShanghaiFace-Zen-BoldGB2.0" but face "ShanghaiFace-Zen-BoldGB2.0-Regular".
+	std::string face, style;
+	if (!psd::font_face_and_style(layer.text_font, face, style)) {
+		face = "PingFangSC-Regular";
+		style = "Regular";
 	}
-
-	obs_data_set_string(settings, "font", family.c_str());
-	obs_data_set_string(settings, "face", family.c_str());
-	// Use the style the font actually provides ("Bold" for a Bold face); a style
+	obs_data_set_string(settings, "font", face.c_str());
+	obs_data_set_string(settings, "face", face.c_str());
+	// "style" must be the name the font manager reports for that face; a variant
 	// the face does not have leaves the source unable to build a glyph cache.
-	obs_data_set_string(settings, "style", psd::font_style(layer.text_font).c_str());
+	obs_data_set_string(settings, "style", style.c_str());
 	obs_data_set_bool(settings, "use_color", true);
 	obs_data_set_string(settings, "text_file", "");
 	obs_data_set_int(settings, "custom_width", layer.width() > 0 ? layer.width() : 1000);
@@ -492,7 +489,7 @@ obs_source_t *create_obs_text_source(BuildState &st, const psd::Layer &layer, do
 	obs_data_release(settings);
 
 	blog(LOG_INFO, "[obs-psd] OBS text source '%s' '%s' face='%s' size=%lld -> %ux%u", layer.name.c_str(),
-	     layer.text.c_str(), family.c_str(), (long long)px, obs_source_get_width(src), obs_source_get_height(src));
+	     layer.text.c_str(), face.c_str(), (long long)px, obs_source_get_width(src), obs_source_get_height(src));
 	st.images.push_back(src);
 	return src;
 }

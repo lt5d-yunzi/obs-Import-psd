@@ -134,6 +134,53 @@ std::string font_style(const std::string &font)
 	return "Regular";
 }
 
+bool font_face_and_style(const std::string &font, std::string &face, std::string &style)
+{
+	face.clear();
+	style.clear();
+	if (font.empty())
+		return false;
+	// Build the font exactly as font_is_usable() does, then ask CoreText for the
+	// two names OBS needs: the PostScript name of the resolved face and the
+	// style variant.
+	CFStringRef name = cf_string(font);
+	if (name == nullptr)
+		return false;
+	CTFontRef f = CTFontCreateWithName(name, 12.0, nullptr);
+	CFRelease(name);
+	if (f == nullptr)
+		return false;
+
+	CFStringRef ps = CTFontCopyPostScriptName(f);
+	if (ps != nullptr) {
+		char buf[256] = {};
+		if (CFStringGetCString(ps, buf, sizeof buf, kCFStringEncodingUTF8))
+			face = buf;
+		CFRelease(ps);
+	}
+
+	// The style is the suffix after the family name; when the PostScript name
+	// has no suffix the face is the regular variant.
+	CFStringRef fam = CTFontCopyFamilyName(f);
+	if (fam != nullptr) {
+		char fbuf[256] = {};
+		if (CFStringGetCString(fam, fbuf, sizeof fbuf, kCFStringEncodingUTF8)) {
+			const std::string family(fbuf);
+			if (face == family)
+				style = "Regular";
+			else if (face.rfind(family + "-", 0) == 0)
+				style = face.substr(family.size() + 1);
+			else if (face.rfind(family, 0) == 0)
+				style = face.substr(family.size());
+		}
+		CFRelease(fam);
+	}
+	if (style.empty())
+		style = "Regular";
+	CFRelease(f);
+	return !face.empty();
+}
+
 bool render_text_layer(const TextRenderRequest &req, TextRenderResult &out)
 {
 	out = TextRenderResult();
