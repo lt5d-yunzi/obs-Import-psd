@@ -437,28 +437,35 @@ obs_source_t *create_obs_text_source(BuildState &st, const psd::Layer &layer, do
 	// no glyphs at all (it rendered 0x0). Family names differ from PostScript
 	// names ("PingFang SC" vs "PingFangSC-Semibold"), so map through the family
 	// list of the installed font.
-	// OBS' text source picks a typeface by the font manager's FACE name and STYLE
-	// name (what Cocoa reports as [NSFont fontName] + style), not by the family
-	// name: for the sample font Cocoa reports family
-	// "ShanghaiFace-Zen-BoldGB2.0" but face "ShanghaiFace-Zen-BoldGB2.0-Regular".
-	std::string face, style;
-	if (!psd::font_face_and_style(layer.text_font, face, style)) {
-		face = "PingFangSC-Regular";
-		style = "Regular";
-	}
-	obs_data_set_string(settings, "font", face.c_str());
-	obs_data_set_string(settings, "face", face.c_str());
-	// "style" must be the name the font manager reports for that face; a variant
-	// the face does not have leaves the source unable to build a glyph cache.
-	obs_data_set_string(settings, "style", style.c_str());
-	obs_data_set_bool(settings, "use_color", true);
-	obs_data_set_string(settings, "text_file", "");
-	obs_data_set_int(settings, "custom_width", layer.width() > 0 ? layer.width() : 1000);
+	// text_ft2_source_v2 keeps the typeface in a NESTED "font" object, exactly as
+	// the OBS UI writes it:
+	//   "font": { "face": <family name>, "style": "Regular", "size": 70, "flags": 0 }
+	// Passing "font" as a plain string (or putting "size" at the top level) makes
+	// the source resolve no glyphs at all, which shows up as a 0x0 source.
+	std::string family = psd::font_family(layer.text_font);
+	if (family.empty())
+		family = "PingFang SC";
+	std::string style = psd::font_style(layer.text_font);
 
 	// PSD point sizes are em sizes; 0.7 matches the glyph height ratio used by
 	// the bitmap renderer.
 	const double px = (layer.text_size > 0 ? layer.text_size * 0.7 : 48.0) * (fit > 0 ? fit : 1.0);
-	obs_data_set_int(settings, "size", (long long)(px > 1.0 ? px : 1.0));
+	const int64_t size_px = int64_t(px > 1.0 ? px : 1.0);
+
+	obs_data_t *font_obj = obs_data_create();
+	obs_data_set_string(font_obj, "face", family.c_str());
+	obs_data_set_string(font_obj, "style", style.c_str());
+	obs_data_set_int(font_obj, "size", size_px);
+	obs_data_set_int(font_obj, "flags", 0);
+	obs_data_set_obj(settings, "font", font_obj);
+	obs_data_release(font_obj);
+
+	obs_data_set_string(settings, "face", family.c_str());
+	obs_data_set_string(settings, "style", style.c_str());
+	obs_data_set_int(settings, "size", size_px);
+	obs_data_set_bool(settings, "use_color", true);
+	obs_data_set_string(settings, "text_file", "");
+	obs_data_set_int(settings, "custom_width", layer.width() > 0 ? layer.width() : 1000);
 
 	// OBS colours are ABGR with the alpha in the high byte.
 	const double *c = st.text_style_valid ? st.text_color : layer.text_color;
@@ -489,7 +496,7 @@ obs_source_t *create_obs_text_source(BuildState &st, const psd::Layer &layer, do
 	obs_data_release(settings);
 
 	blog(LOG_INFO, "[obs-psd] OBS text source '%s' '%s' face='%s' size=%lld -> %ux%u", layer.name.c_str(),
-	     layer.text.c_str(), face.c_str(), (long long)px, obs_source_get_width(src), obs_source_get_height(src));
+	     layer.text.c_str(), family.c_str(), (long long)px, obs_source_get_width(src), obs_source_get_height(src));
 	st.images.push_back(src);
 	return src;
 }
