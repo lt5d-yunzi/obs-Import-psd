@@ -33,6 +33,8 @@ struct PsdText {
 	bool dirty = true;
 
 	gs_texture_t *texture = nullptr;
+	struct obs_source_frame frame = {};
+	size_t frame_bytes = 0;
 };
 
 std::mutex g_tex_mutex;
@@ -101,21 +103,6 @@ void rasterise(PsdText *ctx)
 	     res.used_font.c_str());
 }
 
-void rebuild_texture(PsdText *ctx)
-{
-	if (ctx->texture != nullptr) {
-		gs_texture_destroy(ctx->texture);
-		ctx->texture = nullptr;
-	}
-	if (ctx->width <= 0 || ctx->height <= 0 || ctx->rgba.empty())
-		return;
-
-	std::vector<uint8_t> premul;
-	premultiply_into(ctx->rgba, premul);
-	const uint8_t *planes[1] = {premul.data()};
-	ctx->texture = gs_texture_create(uint32_t(ctx->width), uint32_t(ctx->height), GS_RGBA, 1, planes, 0);
-}
-
 // --------------------------------------------------------------------- source
 
 const char *psd_text_get_name(void *)
@@ -161,6 +148,8 @@ void psd_text_destroy(void *data)
 		gs_texture_destroy(ctx->texture);
 		ctx->texture = nullptr;
 	}
+	free(ctx->frame.data[0]);
+	ctx->frame.data[0] = nullptr;
 	delete ctx;
 }
 
@@ -173,16 +162,41 @@ uint32_t psd_text_get_width(void *data)
 }
 
 // Logs the texture state once per render so an invisible source is diagnosable.
+// Async video: OBS owns the texture. We hand it one frame per change, which
+// avoids creating GL textures ourselves (gs_texture_create returned NULL for
+// this source in every format) and gets scaling/filters for free.
 void psd_text_video_tick(void *data, float)
 {
 	auto *ctx = static_cast<PsdText *>(data);
-	if (ctx->dirty) {
-		std::lock_guard<std::mutex> lock(g_tex_mutex);
-		rasterise(ctx);
-		rebuild_texture(ctx);
-		blog(LOG_INFO, "[obs-psd-text] tick built texture %ux%u (tex=%p)", ctx->width, ctx->height,
-		     (void *)ctx->texture);
+	if (!ctx->dirty)
+		return;
+	rasterise(ctx);
+	if (ctx->width <= 0 || ctx->height <= 0 || ctx->rgba.empty())
+		return;
+
+	const size_t pixel_bytes = size_t(ctx->width) * size_t(ctx->height) * 4u;
+	if (ctx->frame.data[0] == nullptr || ctx->frame_bytes != pixel_bytes) {
+		free(ctx->frame.data[0]);
+		ctx->frame.data[0] = static_cast<uint8_t *>(malloc(pixel_bytes));
+		ctx->frame_bytes = pixel_bytes;
 	}
+	// OBS expects BGRA for GS_BGRA-style async frames; CoreText hands us RGBA.
+	const uint8_t *src = ctx->rgba.data();
+	uint8_t *dst = ctx->frame.data[0];
+	for (size_t i = 0; i + 3 < pixel_bytes; i += 4) {
+		const unsigned a = src[i + 3];
+		dst[i + 0] = uint8_t((unsigned(src[i + 2]) * a + 127u) / 255u);
+		dst[i + 1] = uint8_t((unsigned(src[i + 1]) * a + 127u) / 255u);
+		dst[i + 2] = uint8_t((unsigned(src[i + 0]) * a + 127u) / 255u);
+		dst[i + 3] = uint8_t(a);
+	}
+	ctx->frame.width = uint32_t(ctx->width);
+	ctx->frame.height = uint32_t(ctx->height);
+	ctx->frame.format = VIDEO_FORMAT_BGRA;
+	ctx->frame.linesize[0] = uint32_t(ctx->width) * 4u;
+	ctx->frame.timestamp = 0;
+	obs_source_output_video(ctx->source, &ctx->frame);
+	blog(LOG_INFO, "[obs-psd-text] pushed frame %ux%u", ctx->width, ctx->height);
 }
 
 uint32_t psd_text_get_height(void *data)
@@ -210,24 +224,6 @@ void psd_text_update(void *data, obs_data_t *settings)
 	psd_text_apply_settings(static_cast<PsdText *>(data), settings);
 }
 
-// Called from the graphics thread; rebuild the texture there because creating
-// a texture on the wrong thread is undefined in libobs.
-void psd_text_video_render(void *data, gs_effect_t *)
-{
-	auto *ctx = static_cast<PsdText *>(data);
-	std::lock_guard<std::mutex> lock(g_tex_mutex);
-	if (ctx->dirty) {
-		rasterise(ctx);
-		rebuild_texture(ctx);
-	}
-	if (ctx->texture == nullptr)
-		return;
-	// obs_source_draw() is the documented entry point: it binds the texture and
-	// draws it with the source's own effect handling. drawing manually with
-	// gs_draw_sprite left the source invisible.
-	obs_source_draw(ctx->texture, 0, 0, uint32_t(ctx->width), uint32_t(ctx->height), false);
-}
-
 obs_properties_t *psd_text_get_properties(void *data)
 {
 	auto *ctx = static_cast<PsdText *>(data);
@@ -252,7 +248,7 @@ const obs_source_info kPsdTextInfo = [] {
 	info.type = OBS_SOURCE_TYPE_INPUT;
 	// Plain VIDEO (not CUSTOM_DRAW): OBS wraps the render in its standard
 	// filter/tick path, which is what a simple texture source needs.
-	info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_SRGB;
+	info.output_flags = OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_SRGB;
 	info.get_name = psd_text_get_name;
 	info.create = psd_text_create;
 	info.destroy = psd_text_destroy;
@@ -262,7 +258,6 @@ const obs_source_info kPsdTextInfo = [] {
 	info.get_properties = psd_text_get_properties;
 	info.update = psd_text_update;
 	info.video_tick = psd_text_video_tick;
-	info.video_render = psd_text_video_render;
 	return info;
 }();
 
