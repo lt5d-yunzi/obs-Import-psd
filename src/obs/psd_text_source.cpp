@@ -64,6 +64,8 @@ void premultiply_into(const std::vector<uint8_t> &straight, std::vector<uint8_t>
 
 void rasterise(PsdText *ctx)
 {
+	blog(LOG_INFO, "[obs-psd-text] rasterise: text='%s' font='%s' size=%.1f", ctx->text.c_str(),
+	     ctx->font.c_str(), ctx->font_size);
 	if (ctx->text.empty()) {
 		ctx->rgba.clear();
 		ctx->width = 0;
@@ -84,6 +86,7 @@ void rasterise(PsdText *ctx)
 
 	psd::TextRenderResult res;
 	if (!psd::render_text_layer(req, res)) {
+		blog(LOG_WARNING, "[obs-psd-text] render_text_layer failed");
 		ctx->rgba.clear();
 		ctx->width = 0;
 		ctx->height = 0;
@@ -94,6 +97,8 @@ void rasterise(PsdText *ctx)
 	ctx->width = res.width;
 	ctx->height = res.height;
 	ctx->dirty = false;
+	blog(LOG_INFO, "[obs-psd-text] rasterised -> %dx%d font='%s'", res.width, res.height,
+	     res.used_font.c_str());
 }
 
 void rebuild_texture(PsdText *ctx)
@@ -118,14 +123,33 @@ const char *psd_text_get_name(void *)
 	return obs_module_text("psd_text.name");
 }
 
+void psd_text_apply_settings(PsdText *ctx, obs_data_t *settings)
+{
+	const char *text = obs_data_get_string(settings, "text");
+	const char *font = obs_data_get_string(settings, "font");
+	ctx->text = text ? text : "";
+	ctx->font = font ? font : "";
+	ctx->font_size = obs_data_get_double(settings, "size");
+	ctx->color = uint32_t(obs_data_get_int(settings, "color1"));
+	ctx->stroke = obs_data_get_bool(settings, "stroke");
+	ctx->stroke_width = obs_data_get_double(settings, "stroke_width");
+	ctx->stroke_color = uint32_t(obs_data_get_int(settings, "stroke_color"));
+	ctx->align = int(obs_data_get_int(settings, "align"));
+	ctx->dirty = true;
+}
+
 void *psd_text_create(obs_data_t *settings, obs_source_t *source)
 {
 	auto *ctx = new PsdText();
 	ctx->source = source;
-	ctx->dirty = true;
-	// update() fills the fields; creating with settings already applied is what
-	// the OBS UI does for every source.
-	obs_source_update(source, settings);
+	// Fill the fields straight from the settings we were created with: asking
+	// obs_source_update() to do it would leave get_width() (called right after
+	// creation by the caller) looking at an empty text field.
+	psd_text_apply_settings(ctx, settings);
+	// Rasterise immediately so get_width()/get_height() report the real size
+	// before the first frame is rendered.
+	rasterise(ctx);
+	blog(LOG_INFO, "[obs-psd-text] create: '%s' -> %dx%d", ctx->text.c_str(), ctx->width, ctx->height);
 	return ctx;
 }
 
@@ -146,6 +170,17 @@ uint32_t psd_text_get_width(void *data)
 	if (ctx->dirty)
 		rasterise(ctx);
 	return uint32_t(std::max(0, ctx->width));
+}
+
+// Logs the texture state once per render so an invisible source is diagnosable.
+void psd_text_video_tick(void *data, float)
+{
+	auto *ctx = static_cast<PsdText *>(data);
+	static bool logged = false;
+	if (!logged && ctx->texture != nullptr) {
+		blog(LOG_INFO, "[obs-psd-text] texture %ux%u ready", ctx->width, ctx->height);
+		logged = true;
+	}
 }
 
 uint32_t psd_text_get_height(void *data)
@@ -170,18 +205,7 @@ void psd_text_get_defaults(obs_data_t *settings)
 
 void psd_text_update(void *data, obs_data_t *settings)
 {
-	auto *ctx = static_cast<PsdText *>(data);
-	const char *text = obs_data_get_string(settings, "text");
-	const char *font = obs_data_get_string(settings, "font");
-	ctx->text = text ? text : "";
-	ctx->font = font ? font : "";
-	ctx->font_size = obs_data_get_double(settings, "size");
-	ctx->color = uint32_t(obs_data_get_int(settings, "color1"));
-	ctx->stroke = obs_data_get_bool(settings, "stroke");
-	ctx->stroke_width = obs_data_get_double(settings, "stroke_width");
-	ctx->stroke_color = uint32_t(obs_data_get_int(settings, "stroke_color"));
-	ctx->align = int(obs_data_get_int(settings, "align"));
-	ctx->dirty = true;
+	psd_text_apply_settings(static_cast<PsdText *>(data), settings);
 }
 
 // Called from the graphics thread; rebuild the texture there because creating
@@ -196,11 +220,12 @@ void psd_text_video_render(void *data, gs_effect_t *)
 	}
 	if (ctx->texture == nullptr)
 		return;
+	// Explicit dimensions: gs_draw_sprite with 0 does not draw on every backend.
 	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_DEFAULT);
 	gs_eparam_t *image = gs_effect_get_param_by_name(solid, "image");
 	gs_effect_set_texture(image, ctx->texture);
 	while (gs_effect_loop(solid, "Draw"))
-		gs_draw_sprite(ctx->texture, 0, 0, 0);
+		gs_draw_sprite(ctx->texture, 0, uint32_t(ctx->width), uint32_t(ctx->height));
 }
 
 obs_properties_t *psd_text_get_properties(void *data)
@@ -225,7 +250,9 @@ const obs_source_info kPsdTextInfo = [] {
 	obs_source_info info = {};
 	info.id = kPsdTextSourceId;
 	info.type = OBS_SOURCE_TYPE_INPUT;
-	info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW;
+	// Plain VIDEO (not CUSTOM_DRAW): OBS wraps the render in its standard
+	// filter/tick path, which is what a simple texture source needs.
+	info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_SRGB;
 	info.get_name = psd_text_get_name;
 	info.create = psd_text_create;
 	info.destroy = psd_text_destroy;
@@ -234,6 +261,7 @@ const obs_source_info kPsdTextInfo = [] {
 	info.get_defaults = psd_text_get_defaults;
 	info.get_properties = psd_text_get_properties;
 	info.update = psd_text_update;
+	info.video_tick = psd_text_video_tick;
 	info.video_render = psd_text_video_render;
 	return info;
 }();
