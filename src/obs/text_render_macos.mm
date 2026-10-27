@@ -6,6 +6,7 @@
 #include "obs/text_render.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 
@@ -172,6 +173,99 @@ bool font_face_and_style(const std::string &font, std::string &face, std::string
 		style = "Regular";
 	CFRelease(f);
 	return !face.empty();
+}
+
+std::vector<std::string> similar_font_families(const std::string &missing, int limit)
+{
+	std::vector<std::string> out;
+	if (missing.empty() || limit <= 0)
+		return out;
+
+	// Score every installed family by name affinity and CJK coverage. A PSD
+	// usually names a custom "Zen"/"Black"/"Hei" style Chinese face, so families
+	// sharing a token and covering the CJK block rank first.
+	const std::string want = [&] {
+		std::string w = missing;
+		for (char &c : w)
+			c = char(std::tolower(static_cast<unsigned char>(c)));
+		return w;
+	}();
+	// Tokens that say little about the design.
+	static const char *kNoise[] = {"bold", "light", "medium", "regular", "semibold", "zh", "cn",
+				       "sc",  "gb",    "regular", "thin",     "black",    "book"};
+	auto is_noise = [](const std::string &t) {
+		for (const char *n : kNoise)
+			if (t == n)
+				return true;
+		return false;
+	};
+
+	CFArrayRef families = CTFontManagerCopyAvailableFontFamilyNames();
+	if (families == nullptr)
+		return out;
+	const CFIndex count = CFArrayGetCount(families);
+
+	struct Scored {
+		int score;
+		std::string name;
+	};
+	std::vector<Scored> scored;
+	const UniChar probe[] = {0x540D, 0x4EBA}; // 名人
+
+	for (CFIndex i = 0; i < count; ++i) {
+		char buf[256] = {};
+		CFStringRef ref = static_cast<CFStringRef>(CFArrayGetValueAtIndex(families, i));
+		if (!CFStringGetCString(ref, buf, sizeof buf, kCFStringEncodingUTF8))
+			continue;
+		std::string family(buf);
+		std::string lowered = family;
+		for (char &c : lowered)
+			c = char(std::tolower(static_cast<unsigned char>(c)));
+
+		int score = 0;
+		// Token overlap.
+		size_t pos = 0;
+		while (pos <= lowered.size()) {
+			const size_t dot = lowered.find_first_of(" -._", pos);
+			const std::string token = lowered.substr(pos, dot == std::string::npos ? std::string::npos
+										  : dot - pos);
+			if (!token.empty() && !is_noise(token) && want.find(token) != std::string::npos)
+				score += 3;
+			if (dot == std::string::npos)
+				break;
+			pos = dot + 1;
+		}
+		// Prefix affinity ("heiti" vs "STHeiti").
+		if (lowered.size() >= 4 && want.rfind(lowered.substr(0, 4), 0) != std::string::npos)
+			score += 2;
+		// CJK coverage beats a pretty name.
+		bool covers_cjk = false;
+		CTFontRef probe_font = CTFontCreateWithName(ref, 12.0, nullptr);
+		if (probe_font != nullptr) {
+			CGGlyph glyphs[2] = {};
+			covers_cjk = CTFontGetGlyphsForCharacters(probe_font, probe, glyphs, 2) &&
+				     glyphs[0] != 0 && glyphs[1] != 0;
+			CFRelease(probe_font);
+		}
+		if (covers_cjk)
+			score += 2;
+		// A substitute for Chinese text must actually contain CJK glyphs; without
+		// this the ranking happily suggests Wingdings for a missing Chinese face.
+		if (!covers_cjk)
+			continue;
+		if (score > 0)
+			scored.push_back({score, family});
+	}
+	CFRelease(families);
+
+	std::stable_sort(scored.begin(), scored.end(),
+			 [](const Scored &a, const Scored &b) { return a.score > b.score; });
+	for (const Scored &s : scored) {
+		if (int(out.size()) >= limit)
+			break;
+		out.push_back(s.name);
+	}
+	return out;
 }
 
 bool render_text_layer(const TextRenderRequest &req, TextRenderResult &out)

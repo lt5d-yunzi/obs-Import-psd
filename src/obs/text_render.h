@@ -51,6 +51,11 @@ bool font_is_usable(const std::string &font);
 // OBS' text sources select the typeface by family name. Empty when unknown.
 std::string font_family(const std::string &font);
 
+// Installed font FAMILIES that could stand in for a missing PostScript name,
+// best match first. Used to tell the user what to pick instead of the font the
+// PSD asks for. At most `limit` entries.
+std::vector<std::string> similar_font_families(const std::string &missing, int limit = 5);
+
 // Style name for a PostScript name ("Bold", "Regular", ...). Empty when unknown.
 std::string font_style(const std::string &font);
 

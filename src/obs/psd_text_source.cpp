@@ -198,8 +198,15 @@ void psd_text_push_frame(PsdText *ctx)
 	ctx->frame.format = VIDEO_FORMAT_BGRA;
 	ctx->frame.linesize[0] = uint32_t(ctx->width) * 4u;
 	ctx->frame.timestamp = 0;
+	// Count opaque pixels: a text layer whose font is missing would otherwise
+	// look identical to a positioning bug once it reaches OBS.
+	size_t opaque = 0;
+	for (size_t i = 3; i < pixel_bytes; i += 4)
+		if (dst[i] != 0)
+			++opaque;
 	obs_source_output_video(ctx->source, &ctx->frame);
-	blog(LOG_INFO, "[obs-psd-text] pushed frame %ux%u", ctx->width, ctx->height);
+	blog(LOG_INFO, "[obs-psd-text] pushed frame %ux%u opaque=%zu text='%s'", ctx->width, ctx->height,
+	     opaque, ctx->text.c_str());
 	ctx->dirty = false;
 }
 

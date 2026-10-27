@@ -458,6 +458,17 @@ obs_source_t *create_psd_text_source(BuildState &st, const psd::Layer &layer)
 	obs_data_set_int(settings, "offset_x", layer.left);
 	obs_data_set_int(settings, "offset_y", layer.top);
 
+	// Record a missing PSD font together with installed look-alikes so the import
+	// dialog can offer a concrete replacement instead of a bare "font missing".
+	if (!layer.text_font.empty() && !psd::font_is_usable(layer.text_font)) {
+		MissingFont mf;
+		mf.layer = layer.name;
+		mf.wanted = layer.text_font;
+		mf.used = psd::font_family(layer.text_font);
+		mf.suggestions = psd::similar_font_families(layer.text_font, 5);
+		st.missing_fonts.push_back(std::move(mf));
+	}
+
 	obs_source_t *src = obs_source_create("obs_psd_text_source", layer.name.c_str(), settings, nullptr);
 	obs_data_release(settings);
 	if (!src) {
