@@ -114,6 +114,8 @@ void psd_text_apply_settings(PsdText *ctx, obs_data_t *settings)
 	// importer before this change) wrote a plain PostScript name, so accept both.
 	ctx->font.clear();
 	obs_data_t *font_obj = obs_data_get_obj(settings, "font");
+	blog(LOG_INFO, "[obs-psd-text] apply: font obj=%p, flat string='%s'",
+	     (void *)font_obj, obs_data_get_string(settings, "font"));
 	if (font_obj != nullptr) {
 		const char *face = obs_data_get_string(font_obj, "face");
 		const char *style = obs_data_get_string(font_obj, "style");

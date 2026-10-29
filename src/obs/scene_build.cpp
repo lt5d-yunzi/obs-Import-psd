@@ -609,7 +609,14 @@ obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double
 		blog(LOG_WARNING,
 		     "[obs-psd] text layer '%s' wants font '%s', which is missing here; rendered with '%s'",
 		     layer.name.c_str(), layer.text_font.c_str(), res.used_font.c_str());
-		st.missing_fonts.push_back(MissingFont{layer.name, layer.text_font, res.used_font});
+		MissingFont mf;
+		mf.layer = layer.name;
+		// Report what the PSD asked for; fall back to the face we resolved so the
+		// dialog always names something actionable.
+		mf.wanted = layer.text_font.empty() ? res.used_font : layer.text_font;
+		mf.used = res.used_font;
+		mf.suggestions = psd::similar_font_families(mf.wanted, 5);
+		st.missing_fonts.push_back(std::move(mf));
 	} else {
 		blog(LOG_INFO, "[obs-psd] text layer '%s' rendered with font '%s'", layer.name.c_str(),
 		     res.used_font.c_str());
