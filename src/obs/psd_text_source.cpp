@@ -37,6 +37,11 @@ struct PsdText {
 	gs_texture_t *texture = nullptr;
 	struct obs_source_frame frame = {};
 	size_t frame_bytes = 0;
+
+	// First frames pushed from create() can land before OBS has a graphics
+	// context and get dropped, which left the layer invisible until the user
+	// nudged a property. video_tick retries until a push has been observed.
+	bool frame_pushed = false;
 };
 
 std::mutex g_tex_mutex;
@@ -62,7 +67,6 @@ void rasterise(PsdText *ctx)
 		ctx->rgba.clear();
 		ctx->width = 0;
 		ctx->height = 0;
-		ctx->dirty = false;
 		return;
 	}
 
@@ -82,15 +86,13 @@ void rasterise(PsdText *ctx)
 		ctx->rgba.clear();
 		ctx->width = 0;
 		ctx->height = 0;
-		ctx->dirty = false;
 		return;
 	}
 	ctx->rgba = std::move(res.rgba);
 	ctx->width = res.width;
 	ctx->height = res.height;
-	ctx->dirty = false;
-	blog(LOG_INFO, "[obs-psd-text] rasterised -> %dx%d font='%s'", res.width, res.height,
-	     res.used_font.c_str());
+	blog(LOG_INFO, "[obs-psd-text] rasterised -> %dx%d font='%s'%s", res.width, res.height,
+	     res.used_font.c_str(), res.font_substituted ? " (substituted)" : "");
 }
 
 // --------------------------------------------------------------------- source
@@ -104,9 +106,32 @@ void psd_text_apply_settings(PsdText *ctx, obs_data_t *settings)
 {
 	ctx->dirty = true;
 	const char *text = obs_data_get_string(settings, "text");
-	const char *font = obs_data_get_string(settings, "font");
 	ctx->text = text ? text : "";
-	ctx->font = font ? font : "";
+
+	// obs_properties_add_font() stores a nested object
+	// { face, style, size, flags }; reading it as a string returns "" and the
+	// layer silently falls back to a default face. Older scene files (and the
+	// importer before this change) wrote a plain PostScript name, so accept both.
+	ctx->font.clear();
+	obs_data_t *font_obj = obs_data_get_obj(settings, "font");
+	if (font_obj != nullptr) {
+		const char *face = obs_data_get_string(font_obj, "face");
+		const char *style = obs_data_get_string(font_obj, "style");
+		if (face != nullptr && face[0] != '\0') {
+			ctx->font = face;
+			// The face name alone usually selects the right file; append the
+			// style only when CoreText cannot resolve the bare name.
+			if (!psd::font_is_usable(ctx->font) && style != nullptr && style[0] != '\0')
+				ctx->font += std::string("-") + style;
+		}
+		obs_data_release(font_obj);
+	}
+	if (ctx->font.empty()) {
+		const char *flat = obs_data_get_string(settings, "font");
+		if (flat != nullptr)
+			ctx->font = flat;
+	}
+
 	ctx->font_size = obs_data_get_double(settings, "size");
 	ctx->color = uint32_t(obs_data_get_int(settings, "color1"));
 	ctx->stroke = obs_data_get_bool(settings, "stroke");
@@ -150,8 +175,8 @@ void psd_text_destroy(void *data)
 uint32_t psd_text_get_width(void *data)
 {
 	auto *ctx = static_cast<PsdText *>(data);
-	if (ctx->dirty)
-		rasterise(ctx);
+	// create()/update() already rasterised synchronously so the size is known
+	// before OBS asks; rasterising here as well would race with video_tick.
 	return uint32_t(std::max(0, ctx->width));
 }
 
@@ -194,29 +219,35 @@ void psd_text_push_frame(PsdText *ctx)
 	blog(LOG_INFO, "[obs-psd-text] pushed frame %ux%u opaque=%zu text='%s'", ctx->width, ctx->height,
 	     opaque, ctx->text.c_str());
 	ctx->dirty = false;
+	ctx->frame_pushed = true;
 }
 
 void psd_text_video_tick(void *data, float)
 {
 	auto *ctx = static_cast<PsdText *>(data);
-	if (!ctx->dirty)
+	// Push again until one frame has been handed over while the renderer was
+	// running; a push during create() can happen too early to be accepted.
+	if (!ctx->dirty && ctx->frame_pushed)
 		return;
-	rasterise(ctx);
+	if (ctx->dirty) {
+		rasterise(ctx);
+		ctx->dirty = false;
+	}
 	psd_text_push_frame(ctx);
 }
 
 uint32_t psd_text_get_height(void *data)
 {
 	auto *ctx = static_cast<PsdText *>(data);
-	if (ctx->dirty)
-		rasterise(ctx);
 	return uint32_t(std::max(0, ctx->height));
 }
 
 void psd_text_get_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_string(settings, "text", "");
-	obs_data_set_default_string(settings, "font", "");
+	obs_data_t *font_defaults = obs_data_create();
+	obs_data_set_obj(settings, "font", font_defaults);
+	obs_data_release(font_defaults);
 	obs_data_set_default_double(settings, "size", 100.0);
 	obs_data_set_default_int(settings, "color1", 0xFFFFFFFF);
 	obs_data_set_default_bool(settings, "stroke", false);

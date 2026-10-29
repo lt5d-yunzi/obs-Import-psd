@@ -436,7 +436,21 @@ obs_source_t *create_psd_text_source(BuildState &st, const psd::Layer &layer)
 {
 	obs_data_t *settings = obs_data_create();
 	obs_data_set_string(settings, "text", layer.text.c_str());
-	obs_data_set_string(settings, "font", layer.text_font.c_str());
+	// The source's font property is a nested {face, style, size, flags} object
+	// (obs_properties_add_font), so the importer has to write it the same way or
+	// the property panel shows no font and the renderer loses the PSD face.
+	{
+		const std::string family = psd::font_family(layer.text_font);
+		const std::string style = psd::font_style(layer.text_font);
+		obs_data_t *font_obj = obs_data_create();
+		obs_data_set_string(font_obj, "face", family.c_str());
+		obs_data_set_string(font_obj, "style", style.c_str());
+		obs_data_set_int(font_obj, "size",
+				 int64_t(layer.text_size > 0 ? layer.text_size * 0.7 : 70));
+		obs_data_set_int(font_obj, "flags", 0);
+		obs_data_set_obj(settings, "font", font_obj);
+		obs_data_release(font_obj);
+	}
 	obs_data_set_double(settings, "size",
 			    layer.text_size > 0 ? layer.text_size : 100.0);
 	const double *c = st.text_style_valid ? st.text_color : layer.text_color;
