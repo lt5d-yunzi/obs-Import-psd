@@ -52,20 +52,6 @@ void unpack_color(uint32_t abgr, double out[4])
 		out[3] = 1.0;
 }
 
-// CoreText produces premultiplied RGBA; OBS' default texrender expects straight
-// alpha for GS_BGRA with the standard shader, so premultiply here instead.
-void premultiply_into(const std::vector<uint8_t> &straight, std::vector<uint8_t> &out)
-{
-	out.resize(straight.size());
-	for (size_t i = 0; i + 3 < straight.size(); i += 4) {
-		const unsigned a = straight[i + 3];
-		out[i + 0] = uint8_t((unsigned(straight[i + 0]) * a + 127u) / 255u);
-		out[i + 1] = uint8_t((unsigned(straight[i + 1]) * a + 127u) / 255u);
-		out[i + 2] = uint8_t((unsigned(straight[i + 2]) * a + 127u) / 255u);
-		out[i + 3] = uint8_t(a);
-	}
-}
-
 void psd_text_push_frame(PsdText *ctx);
 
 void rasterise(PsdText *ctx)
