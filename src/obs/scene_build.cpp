@@ -872,6 +872,38 @@ std::vector<std::string> generated_image_files()
 	return g_kept_files ? *g_kept_files : std::vector<std::string>();
 }
 
+// Re-applies the document position to every PSD text source in `scene`
+// (recursing into groups). Called after all sources report a real size, because
+// OBS re-lays out an item while its source still reports a zero size and that
+// overwrote the position place_item() had just set.
+static bool reposition_item_cb(obs_scene_t *, obs_sceneitem_t *item, void *)
+{
+	if (obs_sceneitem_is_group(item)) {
+		obs_scene_t *inner = obs_sceneitem_group_get_scene(item);
+		if (inner != nullptr)
+			obs_scene_enum_items(inner, reposition_item_cb, nullptr);
+		return true;
+	}
+	obs_source_t *src = obs_sceneitem_get_source(item);
+	if (src == nullptr)
+		return true;
+	int x = 0, y = 0, pad = 0;
+	if (!obspsd::psd_text_source_offset(src, x, y, &pad))
+		return true;
+	struct vec2 pos;
+	vec2_set(&pos, (float)(x - pad), (float)(y - pad));
+	obs_sceneitem_set_pos(item, &pos);
+	struct vec2 scale;
+	vec2_set(&scale, 1.0f, 1.0f);
+	obs_sceneitem_set_scale(item, &scale);
+	return true;
+}
+
+static void reposition_text_items(obs_scene_t *scene)
+{
+	obs_scene_enum_items(scene, reposition_item_cb, nullptr);
+}
+
 bool build_scene_from_psd(const psd::Document &doc, const char *scene_name, std::string &err, obs_source_t **scene_out,
 			  const SceneBuildOptions &options)
 {
@@ -952,6 +984,11 @@ bool build_scene_from_psd(const psd::Document &doc, const char *scene_name, std:
 			obs_scene_release(scene);
 			return false;
 		}
+
+		// OBS re-lays out a scene item while the source is still reporting a zero
+		// size, which overwrote the position place_item() had just set on some
+		// text items. Now that every source knows its size, set them again.
+		reposition_text_items(scene);
 	}
 
 	g_missing_fonts = st.missing_fonts;
