@@ -30,6 +30,12 @@ struct PsdText {
 	int box_width = 0;                // layer rectangle size in document px
 	int box_height = 0;
 	int pad = 0;                      // rendered bitmap padding (stroke overhang)
+	// When both are set the frame is the whole document canvas with the glyphs
+	// painted at (offset_x, offset_y). That is exactly how the image layers are
+	// written, so the scene item can sit at the origin and still line up - no
+	// padding/offset arithmetic, no dependence on when OBS lays the item out.
+	int canvas_width = 0;
+	int canvas_height = 0;
 
 	// Rasterised bitmap plus the texture built from it.
 	std::vector<uint8_t> rgba;        // straight alpha, width*height*4
@@ -92,10 +98,41 @@ void rasterise(PsdText *ctx)
 		ctx->height = 0;
 		return;
 	}
+	ctx->pad = res.pad;
+	if (ctx->canvas_width > 0 && ctx->canvas_height > 0) {
+		// Full-canvas frame: the same convention the image layers use, so the
+		// scene item can stay at (0,0) with scale 1 and be pixel-accurate.
+		std::vector<uint8_t> canvas(size_t(ctx->canvas_width) * size_t(ctx->canvas_height) * 4u, 0);
+		const int base_x = ctx->offset_x - res.pad;
+		const int base_y = ctx->offset_y - res.pad;
+		for (int y = 0; y < res.height; ++y) {
+			const int dy = base_y + y;
+			if (dy < 0 || dy >= ctx->canvas_height)
+				continue;
+			for (int x = 0; x < res.width; ++x) {
+				const int dx = base_x + x;
+				if (dx < 0 || dx >= ctx->canvas_width)
+					continue;
+				const uint8_t *src = &res.rgba[(size_t(y) * size_t(res.width) + size_t(x)) * 4u];
+				if (src[3] == 0)
+					continue;
+				uint8_t *dst = &canvas[(size_t(dy) * size_t(ctx->canvas_width) + size_t(dx)) * 4u];
+				dst[0] = src[0];
+				dst[1] = src[1];
+				dst[2] = src[2];
+				dst[3] = src[3];
+			}
+		}
+		ctx->rgba = std::move(canvas);
+		ctx->width = ctx->canvas_width;
+		ctx->height = ctx->canvas_height;
+		blog(LOG_INFO, "[obs-psd-text] rasterised onto %dx%d canvas at (%d,%d) text='%s'",
+		     ctx->width, ctx->height, ctx->offset_x, ctx->offset_y, ctx->text.c_str());
+		return;
+	}
 	ctx->rgba = std::move(res.rgba);
 	ctx->width = res.width;
 	ctx->height = res.height;
-	ctx->pad = res.pad;
 	blog(LOG_INFO, "[obs-psd-text] rasterised -> %dx%d font='%s'%s", res.width, res.height,
 	     res.used_font.c_str(), res.font_substituted ? " (substituted)" : "");
 }
@@ -166,6 +203,8 @@ void psd_text_apply_settings(PsdText *ctx, obs_data_t *settings)
 	// box rather than the padded bitmap.
 	ctx->box_width = int(obs_data_get_int(settings, "box_width"));
 	ctx->box_height = int(obs_data_get_int(settings, "box_height"));
+	ctx->canvas_width = int(obs_data_get_int(settings, "canvas_width"));
+	ctx->canvas_height = int(obs_data_get_int(settings, "canvas_height"));
 }
 
 void *psd_text_create(obs_data_t *settings, obs_source_t *source)

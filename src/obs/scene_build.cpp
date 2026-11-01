@@ -391,38 +391,15 @@ void place_item(obs_sceneitem_t *item, const psd::Layer &layer, const Placement 
 	// their content already carries the document offset and the item sits at the
 	// canvas origin. A PSD text source only rasterises the glyphs, so its item
 	// has to be placed at the layer rectangle's position instead.
-	obs_source_t *src = obs_sceneitem_get_source(item);
-	int text_x = 0, text_y = 0, text_pad = 0;
-	bool text_is_source = false;
-	// Prefer the map the build recorded: obs_source_get_settings() on a source
-	// that was just added to a scene can already have been rewritten by OBS.
-	if (text_offsets != nullptr) {
-		auto it = text_offsets->find(src);
-		if (it != text_offsets->end()) {
-			text_x = it->second[0];
-			text_y = it->second[1];
-			text_is_source = true;
-		}
-	}
-	if (!text_is_source)
-		text_is_source = obspsd::psd_text_source_offset(src, text_x, text_y, &text_pad);
-	if (text_is_source) {
-		// The source's bitmap is the layer rectangle grown by `pad` on each side
-		// for the stroke, so its top-left sits at (offset - pad) in the document.
-		vec2_set(&pos, (float)(p.origin_x + double(text_x - text_pad) * p.fit),
-			 (float)(p.origin_y + double(text_y - text_pad) * p.fit));
-		blog(LOG_INFO, "[obs-psd] text item pos: offset=(%d,%d) pad=%d -> (%.1f,%.1f)", text_x,
-		     text_y, text_pad, pos.x, pos.y);
-	} else {
-		vec2_set(&pos, 0.0f, 0.0f);
-	}
+	// Every layer - image or text - is now a full-canvas bitmap whose glyphs are
+	// already at their document position, so the item always sits at the origin
+	// and only takes the document->canvas scale. No per-type special case.
+	(void)text_offsets;
+	vec2_set(&pos, 0.0f, 0.0f);
 	obs_sceneitem_set_pos(item, &pos);
 
 	struct vec2 scale;
-	// A text source's bitmap is already in document pixels, so it must not be
-	// scaled by the canvas fit (that is what made the text huge and misplaced);
-	// only the full-canvas image layers need it.
-	vec2_set(&scale, text_is_source ? 1.0f : (float)p.fit, text_is_source ? 1.0f : (float)p.fit);
+	vec2_set(&scale, (float)p.fit, (float)p.fit);
 	obs_sceneitem_set_scale(item, &scale);
 }
 
@@ -444,6 +421,8 @@ void apply_blending(obs_sceneitem_t *item, const psd::Layer &layer)
 struct BuildState {
 	std::vector<obs_source_t *> images; // every image source we created (refs held)
 	std::string err;
+	int canvas_w = 0;
+	int canvas_h = 0;
 	// Text styling, taken from SceneBuildOptions when the user set it.
 	bool text_style_valid = false;
 	double text_color[4] = {0.8, 0.6, 0.8, 1.0};
@@ -509,6 +488,10 @@ obs_source_t *create_psd_text_source(BuildState &st, const psd::Layer &layer)
 	obs_data_set_int(settings, "offset_y", layer.top);
 	obs_data_set_int(settings, "box_width", layer.width());
 	obs_data_set_int(settings, "box_height", layer.height());
+	// Text sources render onto the full canvas so their scene item can sit at the
+	// origin exactly like an image layer (see psd_text_source.cpp).
+	obs_data_set_int(settings, "canvas_width", st.canvas_w > 0 ? st.canvas_w : 1920);
+	obs_data_set_int(settings, "canvas_height", st.canvas_h > 0 ? st.canvas_h : 1080);
 
 	// Record a missing PSD font together with installed look-alikes so the import
 	// dialog can offer a concrete replacement instead of a bare "font missing".
@@ -899,10 +882,7 @@ std::vector<std::string> generated_image_files()
 // OBS re-lays out an item while its source still reports a zero size and that
 // overwrote the position place_item() had just set.
 struct RepositionCtx {
-	const std::map<obs_source_t *, std::array<int, 3>> *offsets;
-	// Fallback: source name -> offset, in case a source was recreated and its
-	// pointer changed between the import and this pass.
-	const std::map<std::string, std::array<int, 3>> *by_name = nullptr;
+	float fit = 1.0f;
 };
 
 static bool reposition_item_cb(obs_scene_t *, obs_sceneitem_t *item, void *param)
@@ -917,60 +897,18 @@ static bool reposition_item_cb(obs_scene_t *, obs_sceneitem_t *item, void *param
 	obs_source_t *src = obs_sceneitem_get_source(item);
 	if (src == nullptr)
 		return true;
-	int x = 0, y = 0, pad = 0;
-	bool found = false;
-	if (ctx->offsets != nullptr) {
-		auto it = ctx->offsets->find(src);
-		if (it != ctx->offsets->end()) {
-			x = it->second[0];
-			y = it->second[1];
-			found = true;
-		}
-	}
-	if (!found && ctx->by_name != nullptr) {
-		auto byname = ctx->by_name->find(obs_source_get_name(src));
-		if (byname != ctx->by_name->end()) {
-			x = byname->second[0];
-			y = byname->second[1];
-			found = true;
-		}
-	}
-	if (!found && !obspsd::psd_text_source_offset(src, x, y, &pad))
-		return true;
-	// The bitmap the source actually hands to OBS is grown by its stroke padding,
-	// so the item has to sit `pad` px up/left of the layer rectangle.
-	pad = obspsd::psd_text_source_pad(src);
-	struct vec2 pos;
-	vec2_set(&pos, (float)(x - pad), (float)(y - pad));
+	// Full-canvas layers (images and text alike) all belong at the origin.
+	struct vec2 pos, scale;
+	vec2_set(&pos, 0.0f, 0.0f);
+	vec2_set(&scale, ctx->fit, ctx->fit);
 	obs_sceneitem_set_pos(item, &pos);
-	struct vec2 scale;
-	vec2_set(&scale, 1.0f, 1.0f);
 	obs_sceneitem_set_scale(item, &scale);
 	return true;
 }
 
-static bool log_final_item_cb(obs_scene_t *, obs_sceneitem_t *item, void *)
+static void reposition_text_items(obs_scene_t *scene, double fit)
 {
-	obs_source_t *src = obs_sceneitem_get_source(item);
-	if (src == nullptr)
-		return true;
-	int x = 0, y = 0, pad = 0;
-	if (!obspsd::psd_text_source_offset(src, x, y, &pad))
-		return true;
-	struct vec2 pos, scale;
-	obs_sceneitem_get_pos(item, &pos);
-	obs_sceneitem_get_scale(item, &scale);
-	blog(LOG_INFO, "[obs-psd] final text item '%s' pos=(%.1f,%.1f) scale=%.2f size=%ux%u pad=%d",
-	     obs_source_get_name(src), pos.x, pos.y, scale.x, obs_source_get_width(src),
-	     obs_source_get_height(src), pad);
-	return true;
-}
-
-static void reposition_text_items(obs_scene_t *scene,
-				  const std::map<obs_source_t *, std::array<int, 3>> *offsets,
-				  const std::map<std::string, std::array<int, 3>> *by_name)
-{
-	RepositionCtx ctx{offsets, by_name};
+	RepositionCtx ctx{(float)fit};
 	obs_scene_enum_items(scene, reposition_item_cb, &ctx);
 }
 
@@ -1008,6 +946,8 @@ bool build_scene_from_psd(const psd::Document &doc, const char *scene_name, std:
 	st.text_stroke_width = options.text_stroke_width;
 	st.text_force_obs_source = options.text_force_obs_source;
 	const Placement p = compute_placement(doc, options.placement);
+	st.canvas_w = p.canvas_w > 0 ? p.canvas_w : doc.width;
+	st.canvas_h = p.canvas_h > 0 ? p.canvas_h : doc.height;
 
 	// Public scene (NOT private): obs_scene_create() inserts the scene source into
 	// libobs' public source list, which is what obs_frontend_get_scenes() walks.
@@ -1058,10 +998,9 @@ bool build_scene_from_psd(const psd::Document &doc, const char *scene_name, std:
 		// OBS re-lays out a scene item while the source is still reporting a zero
 		// size, which overwrote the position place_item() had just set on some
 		// text items. Now that every source knows its size, set them again.
-		reposition_text_items(scene, &st.text_offsets, &st.text_offsets_by_name);
+		reposition_text_items(scene, p.fit);
 		// Report the state OBS ended up with: a text layer that is missing from
 		// the canvas is either a zero-sized source or an item that sits outside it.
-		obs_scene_enum_items(scene, log_final_item_cb, nullptr);
 		for (auto &kv : st.text_offsets)
 			blog(LOG_INFO, "[obs-psd] text source %p offset=(%d,%d)", (void *)kv.first,
 			     kv.second[0], kv.second[1]);
