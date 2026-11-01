@@ -51,6 +51,10 @@ bool font_is_usable(const std::string &font);
 // OBS' text sources select the typeface by family name. Empty when unknown.
 std::string font_family(const std::string &font);
 
+// Every installed font family that can render CJK text, sorted. Used to fill the
+// font dropdown of the PSD text source.
+std::vector<std::string> installed_font_families();
+
 // Installed font FAMILIES that could stand in for a missing PostScript name,
 // best match first. Used to tell the user what to pick instead of the font the
 // PSD asks for. At most `limit` entries.

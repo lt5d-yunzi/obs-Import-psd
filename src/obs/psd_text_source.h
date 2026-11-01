@@ -11,6 +11,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 struct obs_source;
 
@@ -25,5 +26,8 @@ constexpr const char *kPsdTextSourceId = "obs_psd_text_source";
 // Document offset stored on a text source by the PSD import. Returns false when
 // `source` is not one of ours.
 bool psd_text_source_offset(struct obs_source *source, int &x, int &y, int *pad = nullptr);
+
+// Installed font families that can render CJK, for the source's font dropdown.
+std::vector<std::string> psd_text_font_families();
 
 } // namespace obspsd

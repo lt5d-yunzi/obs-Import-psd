@@ -318,7 +318,15 @@ obs_properties_t *psd_text_get_properties(void *data)
 	obs_properties_t *props = obs_properties_create();
 
 	obs_properties_add_text(props, "text", obs_module_text("psd_text.text"), OBS_TEXT_MULTILINE);
-	obs_properties_add_font(props, "font", obs_module_text("psd_text.font"));
+	// A plain string list bound to "font_name". obs_properties_add_font() stores a
+	// nested object that does not survive the round trip through
+	// obs_source_create() here (it always came back empty), and the renderer only
+	// needs the PostScript name anyway.
+	obs_property_t *font_list = obs_properties_add_list(props, "font_name",
+							    obs_module_text("psd_text.font"),
+							    OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	for (const std::string &family : psd_text_font_families())
+		obs_property_list_add_string(font_list, family.c_str(), family.c_str());
 	obs_properties_add_float(props, "size", obs_module_text("psd_text.size"), 1.0, 1000.0, 1.0);
 	obs_properties_add_color_alpha(props, "color1", obs_module_text("psd_text.color"));
 	obs_properties_add_bool(props, "stroke", obs_module_text("psd_text.stroke"));
@@ -356,6 +364,11 @@ const obs_source_info kPsdTextInfo = [] {
 void register_psd_text_source()
 {
 	obs_register_source(&kPsdTextInfo);
+}
+
+std::vector<std::string> psd_text_font_families()
+{
+	return psd::installed_font_families();
 }
 
 // Reads the document offset a PSD import stored on a text source instance.

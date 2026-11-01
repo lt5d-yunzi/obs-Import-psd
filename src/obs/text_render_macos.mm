@@ -175,6 +175,37 @@ bool font_face_and_style(const std::string &font, std::string &face, std::string
 	return !face.empty();
 }
 
+std::vector<std::string> installed_font_families()
+{
+	std::vector<std::string> out;
+	CFArrayRef families = CTFontManagerCopyAvailableFontFamilyNames();
+	if (families == nullptr)
+		return out;
+	const CFIndex count = CFArrayGetCount(families);
+	const UniChar probe[] = {0x540D, 0x4EBA}; // 名人
+	for (CFIndex i = 0; i < count; ++i) {
+		CFStringRef ref = static_cast<CFStringRef>(CFArrayGetValueAtIndex(families, i));
+		char buf[256] = {};
+		if (!CFStringGetCString(ref, buf, sizeof buf, kCFStringEncodingUTF8))
+			continue;
+		// Only families that actually carry CJK glyphs are useful here.
+		CTFontRef probe_font = CTFontCreateWithName(ref, 12.0, nullptr);
+		bool cjk = false;
+		if (probe_font != nullptr) {
+			CGGlyph glyphs[2] = {};
+			cjk = CTFontGetGlyphsForCharacters(probe_font, probe, glyphs, 2) && glyphs[0] != 0 &&
+			      glyphs[1] != 0;
+			CFRelease(probe_font);
+		}
+		if (cjk)
+			out.emplace_back(buf);
+	}
+	CFRelease(families);
+	std::sort(out.begin(), out.end());
+	out.erase(std::unique(out.begin(), out.end()), out.end());
+	return out;
+}
+
 std::vector<std::string> similar_font_families(const std::string &missing, int limit)
 {
 	std::vector<std::string> out;
