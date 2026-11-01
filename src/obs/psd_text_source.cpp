@@ -27,6 +27,9 @@ struct PsdText {
 	int align = 0;                    // 0 left, 1 right, 2 centre
 	int offset_x = 0;                 // document position of the layer rect
 	int offset_y = 0;
+	int box_width = 0;                // layer rectangle size in document px
+	int box_height = 0;
+	int pad = 0;                      // rendered bitmap padding (stroke overhang)
 
 	// Rasterised bitmap plus the texture built from it.
 	std::vector<uint8_t> rgba;        // straight alpha, width*height*4
@@ -42,6 +45,7 @@ struct PsdText {
 	// context and get dropped, which left the layer invisible until the user
 	// nudged a property. video_tick retries until a push has been observed.
 	bool frame_pushed = false;
+	int repush = 0;   // ticks left to re-send the current frame
 };
 
 std::mutex g_tex_mutex;
@@ -91,6 +95,7 @@ void rasterise(PsdText *ctx)
 	ctx->rgba = std::move(res.rgba);
 	ctx->width = res.width;
 	ctx->height = res.height;
+	ctx->pad = res.pad;
 	blog(LOG_INFO, "[obs-psd-text] rasterised -> %dx%d font='%s'%s", res.width, res.height,
 	     res.used_font.c_str(), res.font_substituted ? " (substituted)" : "");
 }
@@ -112,27 +117,42 @@ void psd_text_apply_settings(PsdText *ctx, obs_data_t *settings)
 	// { face, style, size, flags }; reading it as a string returns "" and the
 	// layer silently falls back to a default face. Older scene files (and the
 	// importer before this change) wrote a plain PostScript name, so accept both.
+	// Font resolution order, most specific first:
+	//   1. "font_name" — the PostScript name the importer stored verbatim. This
+	//      is the only value that survives every OBS version and is what the
+	//      renderer needs.
+	//   2. the nested "font" object written by obs_properties_add_font, whose
+	//      "face" is a family/face name the user may have just picked.
+	// Reading the object first (as the previous version did) lost the PSD font
+	// whenever OBS rewrote or stripped the nested object.
 	ctx->font.clear();
+	const char *stored = obs_data_get_string(settings, "font_name");
+	if (stored != nullptr && stored[0] != '\0')
+		ctx->font = stored;
 	obs_data_t *font_obj = obs_data_get_obj(settings, "font");
-	blog(LOG_INFO, "[obs-psd-text] apply: font obj=%p, flat string='%s'",
-	     (void *)font_obj, obs_data_get_string(settings, "font"));
+	char obj_face[256] = {};
+	char obj_style[128] = {};
 	if (font_obj != nullptr) {
+		blog(LOG_INFO, "[obs-psd-text] font obj json: %s", obs_data_get_json(font_obj));
 		const char *face = obs_data_get_string(font_obj, "face");
 		const char *style = obs_data_get_string(font_obj, "style");
 		if (face != nullptr && face[0] != '\0') {
-			ctx->font = face;
-			// The face name alone usually selects the right file; append the
-			// style only when CoreText cannot resolve the bare name.
-			if (!psd::font_is_usable(ctx->font) && style != nullptr && style[0] != '\0')
-				ctx->font += std::string("-") + style;
+			snprintf(obj_face, sizeof obj_face, "%s", face);
+			if (style != nullptr && style[0] != '\0')
+				snprintf(obj_style, sizeof obj_style, "%s", style);
 		}
 		obs_data_release(font_obj);
 	}
-	if (ctx->font.empty()) {
-		const char *flat = obs_data_get_string(settings, "font");
-		if (flat != nullptr)
-			ctx->font = flat;
+	// A face the user picked in the properties replaces the imported name.
+	if (obj_face[0] != '\0' && std::string(obj_face) != ctx->font) {
+		std::string candidate = obj_face;
+		if (!psd::font_is_usable(candidate) && obj_style[0] != '\0')
+			candidate += std::string("-") + obj_style;
+		if (psd::font_is_usable(candidate))
+			ctx->font = candidate;
 	}
+	blog(LOG_INFO, "[obs-psd-text] apply: font_name='%s' obj_face='%s' -> font='%s'",
+	     stored ? stored : "", obj_face, ctx->font.c_str());
 
 	ctx->font_size = obs_data_get_double(settings, "size");
 	ctx->color = uint32_t(obs_data_get_int(settings, "color1"));
@@ -142,6 +162,10 @@ void psd_text_apply_settings(PsdText *ctx, obs_data_t *settings)
 	ctx->align = int(obs_data_get_int(settings, "align"));
 	ctx->offset_x = int(obs_data_get_int(settings, "offset_x"));
 	ctx->offset_y = int(obs_data_get_int(settings, "offset_y"));
+	// width/height of the layer rectangle, used to size the frame like the PSD
+	// box rather than the padded bitmap.
+	ctx->box_width = int(obs_data_get_int(settings, "box_width"));
+	ctx->box_height = int(obs_data_get_int(settings, "box_height"));
 }
 
 void *psd_text_create(obs_data_t *settings, obs_source_t *source)
@@ -156,8 +180,9 @@ void *psd_text_create(obs_data_t *settings, obs_source_t *source)
 	// before the first frame is rendered.
 	rasterise(ctx);
 	psd_text_push_frame(ctx);
-	blog(LOG_INFO, "[obs-psd-text] create: '%s' -> %dx%d id=%s", ctx->text.c_str(), ctx->width,
-	     ctx->height, obs_source_get_id(source));
+	ctx->repush = 8;  // see video_tick: the first push often lands too early
+	blog(LOG_INFO, "[obs-psd-text] create: '%s' -> %dx%d font='%s' id=%s", ctx->text.c_str(),
+	     ctx->width, ctx->height, ctx->font.c_str(), obs_source_get_id(source));
 	return ctx;
 }
 
@@ -227,15 +252,20 @@ void psd_text_push_frame(PsdText *ctx)
 void psd_text_video_tick(void *data, float)
 {
 	auto *ctx = static_cast<PsdText *>(data);
-	// Push again until one frame has been handed over while the renderer was
-	// running; a push during create() can happen too early to be accepted.
-	if (!ctx->dirty && ctx->frame_pushed)
-		return;
+	// A frame pushed during create() can arrive before OBS has bound the source
+	// to a render path and be dropped, which showed up as "the layer only
+	// appears after you change a property". Keep pushing for the first few ticks
+	// so a dropped frame is always followed by one that lands.
+	static const int kRepushTicks = 8;
 	if (ctx->dirty) {
 		rasterise(ctx);
 		ctx->dirty = false;
+		ctx->repush = kRepushTicks;
 	}
-	psd_text_push_frame(ctx);
+	if (ctx->repush > 0) {
+		--ctx->repush;
+		psd_text_push_frame(ctx);
+	}
 }
 
 uint32_t psd_text_get_height(void *data)
@@ -247,6 +277,7 @@ uint32_t psd_text_get_height(void *data)
 void psd_text_get_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_string(settings, "text", "");
+	obs_data_set_default_string(settings, "font_name", "");
 	obs_data_t *font_defaults = obs_data_create();
 	obs_data_set_obj(settings, "font", font_defaults);
 	obs_data_release(font_defaults);
@@ -278,6 +309,7 @@ void psd_text_update(void *data, obs_data_t *settings)
 	psd_text_apply_settings(ctx, settings);
 	rasterise(ctx);
 	psd_text_push_frame(ctx);
+	ctx->repush = 8;
 }
 
 obs_properties_t *psd_text_get_properties(void *data)
@@ -327,7 +359,7 @@ void register_psd_text_source()
 }
 
 // Reads the document offset a PSD import stored on a text source instance.
-bool psd_text_source_offset(struct obs_source *source, int &x, int &y)
+bool psd_text_source_offset(struct obs_source *source, int &x, int &y, int *pad)
 {
 	if (source == nullptr || obs_source_get_id(source) == nullptr ||
 	    std::strcmp(obs_source_get_id(source), kPsdTextSourceId) != 0)
@@ -336,6 +368,11 @@ bool psd_text_source_offset(struct obs_source *source, int &x, int &y)
 	x = int(obs_data_get_int(settings, "offset_x"));
 	y = int(obs_data_get_int(settings, "offset_y"));
 	obs_data_release(settings);
+	// The padding depends on the stroke width, so ask the live source.
+	if (pad != nullptr) {
+		auto *ctx = static_cast<PsdText *>(obs_obj_get_data(source));
+		*pad = ctx != nullptr ? ctx->pad : 0;
+	}
 	return true;
 }
 

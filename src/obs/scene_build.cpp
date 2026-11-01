@@ -389,17 +389,25 @@ void place_item(obs_sceneitem_t *item, const psd::Layer &layer, const Placement 
 	// canvas origin. A PSD text source only rasterises the glyphs, so its item
 	// has to be placed at the layer rectangle's position instead.
 	obs_source_t *src = obs_sceneitem_get_source(item);
-	int text_x = 0, text_y = 0;
-	if (obspsd::psd_text_source_offset(src, text_x, text_y)) {
-		vec2_set(&pos, (float)(p.origin_x + double(text_x) * p.fit),
-			 (float)(p.origin_y + double(text_y) * p.fit));
+	int text_x = 0, text_y = 0, text_pad = 0;
+	const bool text_is_source = obspsd::psd_text_source_offset(src, text_x, text_y, &text_pad);
+	if (text_is_source) {
+		// The source's bitmap is the layer rectangle grown by `pad` on each side
+		// for the stroke, so its top-left sits at (offset - pad) in the document.
+		vec2_set(&pos, (float)(p.origin_x + double(text_x - text_pad) * p.fit),
+			 (float)(p.origin_y + double(text_y - text_pad) * p.fit));
+		blog(LOG_INFO, "[obs-psd] text item pos: offset=(%d,%d) pad=%d -> (%.1f,%.1f)", text_x,
+		     text_y, text_pad, pos.x, pos.y);
 	} else {
 		vec2_set(&pos, 0.0f, 0.0f);
 	}
 	obs_sceneitem_set_pos(item, &pos);
 
 	struct vec2 scale;
-	vec2_set(&scale, (float)p.fit, (float)p.fit);
+	// A text source's bitmap is already in document pixels, so it must not be
+	// scaled by the canvas fit (that is what made the text huge and misplaced);
+	// only the full-canvas image layers need it.
+	vec2_set(&scale, text_is_source ? 1.0f : (float)p.fit, text_is_source ? 1.0f : (float)p.fit);
 	obs_sceneitem_set_scale(item, &scale);
 }
 
@@ -448,8 +456,17 @@ obs_source_t *create_psd_text_source(BuildState &st, const psd::Layer &layer)
 		obs_data_set_int(font_obj, "size",
 				 int64_t(layer.text_size > 0 ? layer.text_size * 0.7 : 70));
 		obs_data_set_int(font_obj, "flags", 0);
+		// "font_name" keeps the PostScript name exactly as the PSD wrote it; the
+		// nested object is what the property editor shows and edits.
+		obs_data_set_string(settings, "font_name", layer.text_font.c_str());
+		// obs_data_set_obj() takes its own reference, but the reference it takes
+		// can be dropped once `settings` is handed to obs_source_create(); keep
+		// ours alive by transferring it instead of releasing.
 		obs_data_set_obj(settings, "font", font_obj);
+		obs_data_addref(font_obj);
 		obs_data_release(font_obj);
+		blog(LOG_INFO, "[obs-psd] text font: layer='%s' psd='%s' family='%s' style='%s'",
+		     layer.name.c_str(), layer.text_font.c_str(), family.c_str(), style.c_str());
 	}
 	obs_data_set_double(settings, "size",
 			    layer.text_size > 0 ? layer.text_size : 100.0);
@@ -471,6 +488,8 @@ obs_source_t *create_psd_text_source(BuildState &st, const psd::Layer &layer)
 	// place_item() can put the scene item at the right spot on the canvas.
 	obs_data_set_int(settings, "offset_x", layer.left);
 	obs_data_set_int(settings, "offset_y", layer.top);
+	obs_data_set_int(settings, "box_width", layer.width());
+	obs_data_set_int(settings, "box_height", layer.height());
 
 	// Record a missing PSD font together with installed look-alikes so the import
 	// dialog can offer a concrete replacement instead of a bare "font missing".
