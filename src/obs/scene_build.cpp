@@ -104,6 +104,8 @@
 #include <util/threading.h>
 
 #include <algorithm>
+#include <array>
+#include <map>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -378,7 +380,8 @@ Placement compute_placement(const psd::Document &doc, SceneBuildOptions::Placeme
 	return p;
 }
 
-void place_item(obs_sceneitem_t *item, const psd::Layer &layer, const Placement &p)
+void place_item(obs_sceneitem_t *item, const psd::Layer &layer, const Placement &p,
+		const std::map<obs_source_t *, std::array<int, 3>> *text_offsets = nullptr)
 {
 	obs_sceneitem_set_alignment(item, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
 	obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_NONE);
@@ -390,7 +393,19 @@ void place_item(obs_sceneitem_t *item, const psd::Layer &layer, const Placement 
 	// has to be placed at the layer rectangle's position instead.
 	obs_source_t *src = obs_sceneitem_get_source(item);
 	int text_x = 0, text_y = 0, text_pad = 0;
-	const bool text_is_source = obspsd::psd_text_source_offset(src, text_x, text_y, &text_pad);
+	bool text_is_source = false;
+	// Prefer the map the build recorded: obs_source_get_settings() on a source
+	// that was just added to a scene can already have been rewritten by OBS.
+	if (text_offsets != nullptr) {
+		auto it = text_offsets->find(src);
+		if (it != text_offsets->end()) {
+			text_x = it->second[0];
+			text_y = it->second[1];
+			text_is_source = true;
+		}
+	}
+	if (!text_is_source)
+		text_is_source = obspsd::psd_text_source_offset(src, text_x, text_y, &text_pad);
 	if (text_is_source) {
 		// The source's bitmap is the layer rectangle grown by `pad` on each side
 		// for the stroke, so its top-left sits at (offset - pad) in the document.
@@ -437,6 +452,9 @@ struct BuildState {
 	double text_stroke_color[4] = {1, 1, 1, 1};
 	std::vector<MissingFont> missing_fonts;
 	bool text_force_obs_source = false;
+	// offset (document position, pad) for each text source we created, so the
+	// post-load reposition pass does not have to trust the source's settings.
+	std::map<obs_source_t *, std::array<int, 3>> text_offsets;
 };
 
 // Builds an editable obs_psd_text_source for a PSD type layer.
@@ -510,8 +528,10 @@ obs_source_t *create_psd_text_source(BuildState &st, const psd::Layer &layer)
 		return nullptr;
 	}
 	st.images.push_back(src);
-	blog(LOG_INFO, "[obs-psd] text layer '%s' -> editable PSD text source (%ux%u)", layer.name.c_str(),
-	     obs_source_get_width(src), obs_source_get_height(src));
+	st.text_offsets[src] = {layer.left, layer.top, 0};
+	blog(LOG_INFO, "[obs-psd] text layer '%s' -> editable PSD text source (%ux%u) at (%d,%d)",
+	     layer.name.c_str(), obs_source_get_width(src), obs_source_get_height(src), layer.left,
+	     layer.top);
 	return src;
 }
 
@@ -770,7 +790,7 @@ bool add_layer(BuildState &st, obs_scene_t *parent, const psd::Layer &layer, con
 		return false;
 	}
 
-	place_item(item, layer, p);
+	place_item(item, layer, p, &st.text_offsets);
 	apply_blending(item, layer);
 	obs_sceneitem_set_visible(item, layer.visible);
 	return true;
@@ -876,19 +896,33 @@ std::vector<std::string> generated_image_files()
 // (recursing into groups). Called after all sources report a real size, because
 // OBS re-lays out an item while its source still reports a zero size and that
 // overwrote the position place_item() had just set.
-static bool reposition_item_cb(obs_scene_t *, obs_sceneitem_t *item, void *)
+struct RepositionCtx {
+	const std::map<obs_source_t *, std::array<int, 3>> *offsets;
+};
+
+static bool reposition_item_cb(obs_scene_t *, obs_sceneitem_t *item, void *param)
 {
+	auto *ctx = static_cast<RepositionCtx *>(param);
 	if (obs_sceneitem_is_group(item)) {
 		obs_scene_t *inner = obs_sceneitem_group_get_scene(item);
 		if (inner != nullptr)
-			obs_scene_enum_items(inner, reposition_item_cb, nullptr);
+			obs_scene_enum_items(inner, reposition_item_cb, param);
 		return true;
 	}
 	obs_source_t *src = obs_sceneitem_get_source(item);
 	if (src == nullptr)
 		return true;
 	int x = 0, y = 0, pad = 0;
-	if (!obspsd::psd_text_source_offset(src, x, y, &pad))
+	bool found = false;
+	if (ctx->offsets != nullptr) {
+		auto it = ctx->offsets->find(src);
+		if (it != ctx->offsets->end()) {
+			x = it->second[0];
+			y = it->second[1];
+			found = true;
+		}
+	}
+	if (!found && !obspsd::psd_text_source_offset(src, x, y, &pad))
 		return true;
 	struct vec2 pos;
 	vec2_set(&pos, (float)(x - pad), (float)(y - pad));
@@ -899,9 +933,11 @@ static bool reposition_item_cb(obs_scene_t *, obs_sceneitem_t *item, void *)
 	return true;
 }
 
-static void reposition_text_items(obs_scene_t *scene)
+static void reposition_text_items(obs_scene_t *scene,
+				  const std::map<obs_source_t *, std::array<int, 3>> *offsets)
 {
-	obs_scene_enum_items(scene, reposition_item_cb, nullptr);
+	RepositionCtx ctx{offsets};
+	obs_scene_enum_items(scene, reposition_item_cb, &ctx);
 }
 
 bool build_scene_from_psd(const psd::Document &doc, const char *scene_name, std::string &err, obs_source_t **scene_out,
@@ -988,7 +1024,10 @@ bool build_scene_from_psd(const psd::Document &doc, const char *scene_name, std:
 		// OBS re-lays out a scene item while the source is still reporting a zero
 		// size, which overwrote the position place_item() had just set on some
 		// text items. Now that every source knows its size, set them again.
-		reposition_text_items(scene);
+		reposition_text_items(scene, &st.text_offsets);
+		for (auto &kv : st.text_offsets)
+			blog(LOG_INFO, "[obs-psd] text source %p offset=(%d,%d)", (void *)kv.first,
+			     kv.second[0], kv.second[1]);
 	}
 
 	g_missing_fonts = st.missing_fonts;
