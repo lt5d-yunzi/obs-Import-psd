@@ -30,4 +30,7 @@ bool psd_text_source_offset(struct obs_source *source, int &x, int &y, int *pad 
 // Installed font families that can render CJK, for the source's font dropdown.
 std::vector<std::string> psd_text_font_families();
 
+// Padding (stroke overhang) of a live PSD text source's bitmap, in px.
+int psd_text_source_pad(struct obs_source *source);
+
 } // namespace obspsd

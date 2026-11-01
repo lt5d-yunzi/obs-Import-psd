@@ -371,6 +371,14 @@ std::vector<std::string> psd_text_font_families()
 	return psd::installed_font_families();
 }
 
+int psd_text_source_pad(struct obs_source *source)
+{
+	if (source == nullptr)
+		return 0;
+	auto *ctx = static_cast<PsdText *>(obs_obj_get_data(source));
+	return ctx != nullptr ? ctx->pad : 0;
+}
+
 // Reads the document offset a PSD import stored on a text source instance.
 bool psd_text_source_offset(struct obs_source *source, int &x, int &y, int *pad)
 {
