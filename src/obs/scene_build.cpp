@@ -933,6 +933,23 @@ static bool reposition_item_cb(obs_scene_t *, obs_sceneitem_t *item, void *param
 	return true;
 }
 
+static bool log_final_item_cb(obs_scene_t *, obs_sceneitem_t *item, void *)
+{
+	obs_source_t *src = obs_sceneitem_get_source(item);
+	if (src == nullptr)
+		return true;
+	int x = 0, y = 0, pad = 0;
+	if (!obspsd::psd_text_source_offset(src, x, y, &pad))
+		return true;
+	struct vec2 pos, scale;
+	obs_sceneitem_get_pos(item, &pos);
+	obs_sceneitem_get_scale(item, &scale);
+	blog(LOG_INFO, "[obs-psd] final text item '%s' pos=(%.1f,%.1f) scale=%.2f size=%ux%u pad=%d",
+	     obs_source_get_name(src), pos.x, pos.y, scale.x, obs_source_get_width(src),
+	     obs_source_get_height(src), pad);
+	return true;
+}
+
 static void reposition_text_items(obs_scene_t *scene,
 				  const std::map<obs_source_t *, std::array<int, 3>> *offsets)
 {
@@ -1025,6 +1042,9 @@ bool build_scene_from_psd(const psd::Document &doc, const char *scene_name, std:
 		// size, which overwrote the position place_item() had just set on some
 		// text items. Now that every source knows its size, set them again.
 		reposition_text_items(scene, &st.text_offsets);
+		// Report the state OBS ended up with: a text layer that is missing from
+		// the canvas is either a zero-sized source or an item that sits outside it.
+		obs_scene_enum_items(scene, log_final_item_cb, nullptr);
 		for (auto &kv : st.text_offsets)
 			blog(LOG_INFO, "[obs-psd] text source %p offset=(%d,%d)", (void *)kv.first,
 			     kv.second[0], kv.second[1]);
