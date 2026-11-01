@@ -374,10 +374,17 @@ std::vector<std::string> psd_text_font_families()
 // Reads the document offset a PSD import stored on a text source instance.
 bool psd_text_source_offset(struct obs_source *source, int &x, int &y, int *pad)
 {
-	if (source == nullptr || obs_source_get_id(source) == nullptr ||
-	    std::strcmp(obs_source_get_id(source), kPsdTextSourceId) != 0)
+	if (source == nullptr)
 		return false;
+	// Identify our source by the data it carries rather than by id: the id this
+	// build reports (obs_source_get_id()) is not reliably the unversioned one.
 	obs_data_t *settings = obs_source_get_settings(source);
+	const bool ours = obs_data_has_user_value(settings, "offset_x") ||
+			  obs_data_has_user_value(settings, "font_name");
+	if (!ours) {
+		obs_data_release(settings);
+		return false;
+	}
 	x = int(obs_data_get_int(settings, "offset_x"));
 	y = int(obs_data_get_int(settings, "offset_y"));
 	obs_data_release(settings);
