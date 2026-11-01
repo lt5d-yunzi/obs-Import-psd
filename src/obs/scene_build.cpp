@@ -469,12 +469,14 @@ obs_source_t *create_psd_text_source(BuildState &st, const psd::Layer &layer)
 	obs_data_set_double(settings, "size",
 			    layer.text_size > 0 ? layer.text_size : 100.0);
 	const double *c = st.text_style_valid ? st.text_color : layer.text_color;
+	// OBS stores colours as 0xAABBGGRR (R in the LOW byte), not 0xRRGGBBAA.
+	// Getting this backwards made a red fill come out blue.
 	auto pack = [](const double rgba[4]) {
 		const uint32_t r = uint32_t(std::max(0.0, std::min(1.0, rgba[0])) * 255.0);
 		const uint32_t g = uint32_t(std::max(0.0, std::min(1.0, rgba[1])) * 255.0);
 		const uint32_t b = uint32_t(std::max(0.0, std::min(1.0, rgba[2])) * 255.0);
 		const uint32_t a = uint32_t(std::max(0.0, std::min(1.0, rgba[3])) * 255.0);
-		return (a << 24) | (r << 16) | (g << 8) | b;
+		return (a << 24) | (b << 16) | (g << 8) | r;
 	};
 	obs_data_set_int(settings, "color1", pack(c));
 	obs_data_set_bool(settings, "stroke", st.text_style_valid ? st.text_stroke : layer.stroke_on);
@@ -559,12 +561,12 @@ obs_source_t *create_obs_text_source(BuildState &st, const psd::Layer &layer, do
 	// Only the keys the OBS UI itself writes. Mirroring the nested object and
 	// leaving the rest at their defaults is what made the hand-made source work.
 
-	// OBS colours are ABGR with the alpha in the high byte.
+	// OBS stores colours as 0xAABBGGRR (R in the low byte).
 	const double *c = st.text_style_valid ? st.text_color : layer.text_color;
-	const uint32_t r = uint32_t(std::max(0.0, std::min(1.0, c[0])) * 255.0);
-	const uint32_t g = uint32_t(std::max(0.0, std::min(1.0, c[1])) * 255.0);
-	const uint32_t b = uint32_t(std::max(0.0, std::min(1.0, c[2])) * 255.0);
-	const uint32_t color = (0xFFu << 24) | (r << 16) | (g << 8) | b;
+	const uint32_t rr = uint32_t(std::max(0.0, std::min(1.0, c[0])) * 255.0);
+	const uint32_t gg = uint32_t(std::max(0.0, std::min(1.0, c[1])) * 255.0);
+	const uint32_t bb = uint32_t(std::max(0.0, std::min(1.0, c[2])) * 255.0);
+	const uint32_t color = (0xFFu << 24) | (bb << 16) | (gg << 8) | rr;
 	obs_data_set_int(settings, "color1", color);
 	obs_data_set_int(settings, "color2", color);
 	obs_data_set_bool(settings, "outline", st.text_style_valid && st.text_stroke);
