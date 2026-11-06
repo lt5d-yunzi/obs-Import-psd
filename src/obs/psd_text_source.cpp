@@ -56,7 +56,9 @@ struct PsdText {
 	// context and get dropped, which left the layer invisible until the user
 	// nudged a property. video_tick retries until a push has been observed.
 	bool frame_pushed = false;
-	int repush = 0;   // ticks left to re-send the current frame
+	int repush = 0;      // ticks left to re-send the current frame
+	int active_ticks = 0;  // ticks seen since the source became active
+	bool rgba_dirty = true; // ctx->rgba changed and needs re-converting to BGRA
 };
 
 std::mutex g_tex_mutex;
@@ -107,6 +109,7 @@ void rasterise(PsdText *ctx)
 		return;
 	}
 	ctx->pad = res.pad;
+	ctx->rgba_dirty = true;
 	if (ctx->canvas_width > 0 && ctx->canvas_height > 0) {
 		// Full-canvas frame: the same convention the image layers use, so the
 		// scene item can stay at (0,0) with scale 1 and be pixel-accurate.
@@ -271,15 +274,21 @@ void psd_text_push_frame(PsdText *ctx)
 		ctx->frame_bytes = pixel_bytes;
 	}
 	// OBS expects BGRA for GS_BGRA-style async frames; CoreText hands us RGBA.
-	const uint8_t *src = ctx->rgba.data();
-	uint8_t *dst = ctx->frame.data[0];
-	for (size_t i = 0; i + 3 < pixel_bytes; i += 4) {
-		const unsigned a = src[i + 3];
-		dst[i + 0] = uint8_t((unsigned(src[i + 2]) * a + 127u) / 255u);
-		dst[i + 1] = uint8_t((unsigned(src[i + 1]) * a + 127u) / 255u);
-		dst[i + 2] = uint8_t((unsigned(src[i + 0]) * a + 127u) / 255u);
-		dst[i + 3] = uint8_t(a);
+	// The conversion is skipped when nothing changed, since the buffer is reused.
+	if (ctx->rgba_dirty || ctx->frame.data[0] == nullptr) {
+		const uint8_t *src = ctx->rgba.data();
+		uint8_t *dst2 = ctx->frame.data[0];
+		for (size_t i = 0; i + 3 < pixel_bytes; i += 4) {
+			const unsigned a = src[i + 3];
+			dst2[i + 0] = uint8_t((unsigned(src[i + 2]) * a + 127u) / 255u);
+			dst2[i + 1] = uint8_t((unsigned(src[i + 1]) * a + 127u) / 255u);
+			dst2[i + 2] = uint8_t((unsigned(src[i + 0]) * a + 127u) / 255u);
+			dst2[i + 3] = uint8_t(a);
+		}
+		ctx->rgba_dirty = false;
 	}
+	const uint8_t *dst = ctx->frame.data[0];
+	(void)dst;
 	ctx->frame.width = uint32_t(ctx->width);
 	ctx->frame.height = uint32_t(ctx->height);
 	ctx->frame.format = VIDEO_FORMAT_BGRA;
@@ -288,31 +297,40 @@ void psd_text_push_frame(PsdText *ctx)
 	// Count opaque pixels: a text layer whose font is missing would otherwise
 	// look identical to a positioning bug once it reaches OBS.
 	size_t opaque = 0;
+	const uint8_t *frame_px = ctx->frame.data[0];
 	for (size_t i = 3; i < pixel_bytes; i += 4)
-		if (dst[i] != 0)
+		if (frame_px[i] != 0)
 			++opaque;
 	obs_source_output_video(ctx->source, &ctx->frame);
 	blog(LOG_INFO, "[obs-psd-text] pushed frame %ux%u opaque=%zu text='%s'", ctx->width, ctx->height,
 	     opaque, ctx->text.c_str());
-	ctx->dirty = false;
+	// Keep the buffer: video_tick re-sends the same frame while the source is
+	// warming up, and obs_source_output_video() is what actually delivers it.
 	ctx->frame_pushed = true;
 }
 
 void psd_text_video_tick(void *data, float)
 {
 	auto *ctx = static_cast<PsdText *>(data);
-	// A frame pushed during create() can arrive before OBS has bound the source
-	// to a render path and be dropped, which showed up as "the layer only
-	// appears after you change a property". Keep pushing for the first few ticks
-	// so a dropped frame is always followed by one that lands.
-	static const int kRepushTicks = 8;
 	if (ctx->dirty) {
 		rasterise(ctx);
 		ctx->dirty = false;
-		ctx->repush = kRepushTicks;
+		ctx->repush = 8;
 	}
-	if (ctx->repush > 0) {
-		--ctx->repush;
+	// Async video needs a fresh frame at least once after the source becomes
+	// active, otherwise OBS shows nothing until something else forces an update.
+	// A fixed count was not enough across a restart (the scene is loaded before
+	// the renderer is ready and every push is dropped), so keep pushing while
+	// the source is active until OBS reports a non-zero size back to us.
+	// Async video: OBS only renders a frame it was handed while the source was
+	// active. Pushing repeatedly is cheap (the buffer is rebuilt only when the
+	// text changed) and covers the case where the scene is restored before the
+	// renderer is ready - that is why a restart used to need a manual update.
+	const bool still_warming_up = ctx->active_ticks < 60;
+	if (ctx->repush > 0 || still_warming_up) {
+		++ctx->active_ticks;
+		if (ctx->repush > 0)
+			--ctx->repush;
 		psd_text_push_frame(ctx);
 	}
 }
@@ -343,6 +361,10 @@ void psd_text_get_defaults(obs_data_t *settings)
 void psd_text_activate(void *data)
 {
 	auto *ctx = static_cast<PsdText *>(data);
+	// Coming back from a restart (or being shown again) the previous frame is
+	// gone: ask for a fresh one.
+	ctx->repush = 8;
+	ctx->active_ticks = 0;
 	blog(LOG_INFO, "[obs-psd-text] activate '%s'", ctx->text.c_str());
 }
 
@@ -350,6 +372,19 @@ void psd_text_deactivate(void *data)
 {
 	auto *ctx = static_cast<PsdText *>(data);
 	blog(LOG_INFO, "[obs-psd-text] deactivate '%s'", ctx->text.c_str());
+}
+
+// Called when a saved scene is loaded (i.e. after an OBS restart). The frame
+// from the previous session is long gone, so mark the source for a re-push.
+void psd_text_load(void *data, obs_data_t *settings)
+{
+	auto *ctx = static_cast<PsdText *>(data);
+	psd_text_apply_settings(ctx, settings);
+	rasterise(ctx);
+	ctx->repush = 8;
+	ctx->active_ticks = 0;
+	ctx->frame_pushed = false;
+	blog(LOG_INFO, "[obs-psd-text] load '%s' -> %dx%d", ctx->text.c_str(), ctx->width, ctx->height);
 }
 
 void psd_text_update(void *data, obs_data_t *settings)
@@ -402,6 +437,7 @@ const obs_source_info kPsdTextInfo = [] {
 	info.get_defaults = psd_text_get_defaults;
 	info.get_properties = psd_text_get_properties;
 	info.update = psd_text_update;
+	info.load = psd_text_load;
 	info.activate = psd_text_activate;
 	info.deactivate = psd_text_deactivate;
 	info.video_tick = psd_text_video_tick;
