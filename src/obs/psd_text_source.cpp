@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "psd_text_source.h"
 
+#include "log_redact.h"
 #include "text_render.h"
 #include "obs_include.h"
 
@@ -81,8 +82,9 @@ void psd_text_push_frame(PsdText *ctx);
 
 void rasterise(PsdText *ctx)
 {
-	blog(LOG_INFO, "[obs-psd-text] rasterise: text='%s' font='%s' size=%.1f", ctx->text.c_str(),
-	     ctx->font.c_str(), ctx->font_size);
+	blog(LOG_INFO, "[obs-psd-text] rasterise: text=%s font=%s size=%.1f",
+	     obspsd::redact_text(ctx->text).c_str(), obspsd::redact_font(ctx->font).c_str(),
+	     ctx->font_size);
 	if (ctx->text.empty()) {
 		ctx->rgba.clear();
 		ctx->width = 0;
@@ -137,15 +139,17 @@ void rasterise(PsdText *ctx)
 		ctx->rgba = std::move(canvas);
 		ctx->width = ctx->canvas_width;
 		ctx->height = ctx->canvas_height;
-		blog(LOG_INFO, "[obs-psd-text] rasterised onto %dx%d canvas at (%d,%d) text='%s'",
-		     ctx->width, ctx->height, ctx->offset_x, ctx->offset_y, ctx->text.c_str());
+		blog(LOG_INFO, "[obs-psd-text] rasterised onto %dx%d canvas at (%d,%d) text=%s",
+		     ctx->width, ctx->height, ctx->offset_x, ctx->offset_y,
+		     obspsd::redact_text(ctx->text).c_str());
 		return;
 	}
 	ctx->rgba = std::move(res.rgba);
 	ctx->width = res.width;
 	ctx->height = res.height;
-	blog(LOG_INFO, "[obs-psd-text] rasterised -> %dx%d font='%s'%s", res.width, res.height,
-	     res.used_font.c_str(), res.font_substituted ? " (substituted)" : "");
+	blog(LOG_INFO, "[obs-psd-text] rasterised -> %dx%d font=%s%s", res.width, res.height,
+	     obspsd::redact_font(res.used_font).c_str(),
+	     res.font_substituted ? " (substituted)" : "");
 }
 
 // --------------------------------------------------------------------- source
@@ -181,7 +185,7 @@ void psd_text_apply_settings(PsdText *ctx, obs_data_t *settings)
 	char obj_face[256] = {};
 	char obj_style[128] = {};
 	if (font_obj != nullptr) {
-		blog(LOG_INFO, "[obs-psd-text] font obj json: %s", obs_data_get_json(font_obj));
+		blog(LOG_INFO, "[obs-psd-text] font object present");
 		const char *face = obs_data_get_string(font_obj, "face");
 		const char *style = obs_data_get_string(font_obj, "style");
 		if (face != nullptr && face[0] != '\0') {
@@ -199,8 +203,10 @@ void psd_text_apply_settings(PsdText *ctx, obs_data_t *settings)
 		if (psd::font_is_usable(candidate))
 			ctx->font = candidate;
 	}
-	blog(LOG_INFO, "[obs-psd-text] apply: font_name='%s' obj_face='%s' -> font='%s'",
-	     stored ? stored : "", obj_face, ctx->font.c_str());
+	blog(LOG_INFO, "[obs-psd-text] apply: stored=%s object=%s -> font=%s",
+	     stored && *stored ? obspsd::redact_font(stored).c_str() : "<empty>",
+	     obj_face[0] ? obspsd::redact_font(obj_face).c_str() : "<empty>",
+	     obspsd::redact_font(ctx->font).c_str());
 
 	ctx->font_size = obs_data_get_double(settings, "size");
 	ctx->color = uint32_t(obs_data_get_int(settings, "color1"));
@@ -233,8 +239,9 @@ void *psd_text_create(obs_data_t *settings, obs_source_t *source)
 	rasterise(ctx);
 	psd_text_push_frame(ctx);
 	ctx->repush = 8;  // see video_tick: the first push often lands too early
-	blog(LOG_INFO, "[obs-psd-text] create: '%s' -> %dx%d font='%s' id=%s", ctx->text.c_str(),
-	     ctx->width, ctx->height, ctx->font.c_str(), obs_source_get_id(source));
+	blog(LOG_INFO, "[obs-psd-text] create: %s -> %dx%d font=%s id=%s",
+	     obspsd::redact_text(ctx->text).c_str(), ctx->width, ctx->height,
+	     obspsd::redact_font(ctx->font).c_str(), obs_source_get_id(source));
 	return ctx;
 }
 
@@ -302,8 +309,8 @@ void psd_text_push_frame(PsdText *ctx)
 		if (frame_px[i] != 0)
 			++opaque;
 	obs_source_output_video(ctx->source, &ctx->frame);
-	blog(LOG_INFO, "[obs-psd-text] pushed frame %ux%u opaque=%zu text='%s'", ctx->width, ctx->height,
-	     opaque, ctx->text.c_str());
+	blog(LOG_INFO, "[obs-psd-text] pushed frame %ux%u opaque=%zu text=%s", ctx->width, ctx->height,
+	     opaque, obspsd::redact_text(ctx->text).c_str());
 	// Keep the buffer: video_tick re-sends the same frame while the source is
 	// warming up, and obs_source_output_video() is what actually delivers it.
 	ctx->frame_pushed = true;
@@ -365,13 +372,13 @@ void psd_text_activate(void *data)
 	// gone: ask for a fresh one.
 	ctx->repush = 8;
 	ctx->active_ticks = 0;
-	blog(LOG_INFO, "[obs-psd-text] activate '%s'", ctx->text.c_str());
+	blog(LOG_INFO, "[obs-psd-text] activate %s", obspsd::redact_text(ctx->text).c_str());
 }
 
 void psd_text_deactivate(void *data)
 {
 	auto *ctx = static_cast<PsdText *>(data);
-	blog(LOG_INFO, "[obs-psd-text] deactivate '%s'", ctx->text.c_str());
+	blog(LOG_INFO, "[obs-psd-text] deactivate %s", obspsd::redact_text(ctx->text).c_str());
 }
 
 // Called when a saved scene is loaded (i.e. after an OBS restart). The frame
@@ -384,7 +391,8 @@ void psd_text_load(void *data, obs_data_t *settings)
 	ctx->repush = 8;
 	ctx->active_ticks = 0;
 	ctx->frame_pushed = false;
-	blog(LOG_INFO, "[obs-psd-text] load '%s' -> %dx%d", ctx->text.c_str(), ctx->width, ctx->height);
+	blog(LOG_INFO, "[obs-psd-text] load %s -> %dx%d", obspsd::redact_text(ctx->text).c_str(),
+	     ctx->width, ctx->height);
 }
 
 void psd_text_update(void *data, obs_data_t *settings)

@@ -92,6 +92,7 @@
 // =============================================================================
 
 #include "scene_build.h"
+#include "log_redact.h"
 #include "psd_text_source.h"
 #include "obs/text_render.h"
 #include "../psd/psd_file.h"
@@ -469,8 +470,9 @@ obs_source_t *create_psd_text_source(BuildState &st, const psd::Layer &layer)
 		obs_data_set_obj(settings, "font", font_obj);
 		obs_data_addref(font_obj);
 		obs_data_release(font_obj);
-		blog(LOG_INFO, "[obs-psd] text font: layer='%s' psd='%s' family='%s' style='%s'",
-		     layer.name.c_str(), layer.text_font.c_str(), family.c_str(), style.c_str());
+		blog(LOG_INFO, "[obs-psd] text font: layer='%s' psd=%s family=%s style=%s",
+		     redact_name(layer.name, "layer", 0).c_str(), redact_font(layer.text_font).c_str(),
+		     redact_font(family).c_str(), style.empty() ? "<none>" : "<set>");
 	}
 	obs_data_set_double(settings, "size",
 			    layer.text_size > 0 ? layer.text_size : 100.0);
@@ -516,15 +518,15 @@ obs_source_t *create_psd_text_source(BuildState &st, const psd::Layer &layer)
 	obs_data_release(settings);
 	if (!src) {
 		blog(LOG_WARNING, "[obs-psd] could not create obs_psd_text_source for '%s'",
-		     layer.name.c_str());
+		     redact_name(layer.name, "layer", 0).c_str());
 		return nullptr;
 	}
 	st.images.push_back(src);
 	st.text_offsets[src] = {layer.left, layer.top, 0};
 	st.text_offsets_by_name[layer.name] = {layer.left, layer.top, 0};
 	blog(LOG_INFO, "[obs-psd] text layer '%s' -> editable PSD text source (%ux%u) at (%d,%d)",
-	     layer.name.c_str(), obs_source_get_width(src), obs_source_get_height(src), layer.left,
-	     layer.top);
+	     redact_name(layer.name, "layer", 0).c_str(), obs_source_get_width(src),
+	     obs_source_get_height(src), layer.left, layer.top);
 	return src;
 }
 
@@ -590,8 +592,10 @@ obs_source_t *create_obs_text_source(BuildState &st, const psd::Layer &layer, do
 	obs_source_update(src, settings);
 	obs_data_release(settings);
 
-	blog(LOG_INFO, "[obs-psd] OBS text source '%s' '%s' face='%s' size=%lld -> %ux%u", layer.name.c_str(),
-	     layer.text.c_str(), family.c_str(), (long long)px, obs_source_get_width(src), obs_source_get_height(src));
+	blog(LOG_INFO, "[obs-psd] OBS text source '%s' %s face=%s size=%lld -> %ux%u",
+	     redact_name(layer.name, "layer", 0).c_str(), redact_text(layer.text).c_str(),
+	     redact_font(family).c_str(), (long long)px, obs_source_get_width(src),
+	     obs_source_get_height(src));
 	st.images.push_back(src);
 	return src;
 }
@@ -632,15 +636,17 @@ obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double
 
 	psd::TextRenderResult res;
 	if (!psd::render_text_layer(req, res)) {
-		blog(LOG_WARNING, "[obs-psd] could not render text layer '%s' (text='%s', font='%s')",
-		     layer.name.c_str(), layer.text.c_str(), layer.text_font.c_str());
+		blog(LOG_WARNING, "[obs-psd] could not render text layer '%s' (text=%s, font=%s)",
+		     redact_name(layer.name, "layer", 0).c_str(), redact_text(layer.text).c_str(),
+		     redact_font(layer.text_font).c_str());
 		// Last resort: let OBS try to display something.
 		return create_obs_text_source(st, layer, fit);
 	}
 	if (res.font_substituted) {
 		blog(LOG_WARNING,
-		     "[obs-psd] text layer '%s' wants font '%s', which is missing here; rendered with '%s'",
-		     layer.name.c_str(), layer.text_font.c_str(), res.used_font.c_str());
+		     "[obs-psd] text layer '%s' wants font %s, which is missing here; rendered with %s",
+		     redact_name(layer.name, "layer", 0).c_str(), redact_font(layer.text_font).c_str(),
+		     redact_font(res.used_font).c_str());
 		MissingFont mf;
 		mf.layer = layer.name;
 		// Report what the PSD asked for; fall back to the face we resolved so the
@@ -650,8 +656,8 @@ obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double
 		mf.suggestions = psd::similar_font_families(mf.wanted, 5);
 		st.missing_fonts.push_back(std::move(mf));
 	} else {
-		blog(LOG_INFO, "[obs-psd] text layer '%s' rendered with font '%s'", layer.name.c_str(),
-		     res.used_font.c_str());
+		blog(LOG_INFO, "[obs-psd] text layer '%s' rendered with font %s",
+		     redact_name(layer.name, "layer", 0).c_str(), redact_font(res.used_font).c_str());
 	}
 
 	// Same full-canvas convention as image layers: blit the rendered text at the
@@ -765,12 +771,13 @@ bool add_layer(BuildState &st, obs_scene_t *parent, const psd::Layer &layer, con
 	if (layer.empty() || (layer.rgba.empty() && !is_text)) {
 		// Vector shape layers store no pixels in a PSD (Photoshop renders them on
 		// the fly) and carry no text, so there is nothing to import for them.
-		blog(LOG_INFO, "[obs-psd] layer '%s' has no pixel data (vector shape); skipped", layer.name.c_str());
+		blog(LOG_INFO, "[obs-psd] layer '%s' has no pixel data (vector shape); skipped",
+		     redact_name(layer.name, "layer", 0).c_str());
 		return true;
 	}
 	if (layer.clipped)
 		blog(LOG_WARNING, "[obs-psd] layer '%s' uses a clipping mask; imported as a plain layer",
-		     layer.name.c_str());
+		     redact_name(layer.name, "layer", 0).c_str());
 
 	obs_source_t *src = is_text ? create_text_source(st, layer, p.fit, p.canvas_w, p.canvas_h)
 					     : create_layer_source(st, layer, p.canvas_w, p.canvas_h);
@@ -825,7 +832,8 @@ bool add_group(BuildState &st, obs_scene_t *parent, const psd::Document &doc, si
 		obs_sceneitem_set_scale(group_item, &gscale);
 	}
 
-	blog(LOG_INFO, "[obs-psd] group '%s' contains %zu layer(s)", gl.name.c_str(), end - group_index - 1);
+	blog(LOG_INFO, "[obs-psd] group '%s' contains %zu layer(s)",
+	     redact_name(gl.name, "group", 0).c_str(), end - group_index - 1);
 
 	bool any_visible = false;
 	size_t i = group_index + 1;
@@ -1022,8 +1030,9 @@ bool build_scene_from_psd(const psd::Document &doc, const char *scene_name, std:
 	for (obs_source_t *s : st.images)
 		obs_source_release(s);
 
-	blog(LOG_INFO, "[obs-psd] built scene '%s' from %zu PSD layer(s), %s placement, fit %.3f", scene_name,
-	     doc.layers.size(), options.placement == SceneBuildOptions::Place_FitCanvas ? "fit-canvas" : "doc-pixels",
+	blog(LOG_INFO, "[obs-psd] built scene '%s' from %zu PSD layer(s), %s placement, fit %.3f",
+	     redact_name(scene_name, "scene", 0).c_str(), doc.layers.size(),
+	     options.placement == SceneBuildOptions::Place_FitCanvas ? "fit-canvas" : "doc-pixels",
 	     p.fit);
 
 	// Reference bookkeeping: obs_scene_create() returns 1 scene reference and
