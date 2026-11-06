@@ -314,8 +314,9 @@ GPL 的传染性决定了：链接它的插件必须同样以 GPL 发布。这�
   （学术成果认定、职称评审、竞赛原创性审查等）。
 * 代码按 GPL 正常授权，**法律上可用于商业用途**（见上一条），
   但**不得**用于上述登记/认定场景。
-* 如果你需要一份可以申请软著的实现，应基于本项目的思路
-  **由人类重新独立编写**。
+* **即使换人重写也不构成独创性**：本项目的功能、设计与实现已经以
+  AI 生成的形式公开发布，相同功能的技术方案已进入公有领域可查范围，
+  后写的实现难以再被认定为“独立创作”，因此同样不适合作为软著登记标的。
 
 ### 第三方代码
 
@@ -464,8 +465,10 @@ Consequences you should know before reuse:
   competitions.
 * The code is still licensed under the GPL and may be used commercially
   (see above); it just may not be used for those claims of authorship.
-* If you need a registrable implementation, write one yourself from the ideas
-  here instead of copying this code.
+* Rewriting the same functionality does not restore originality either: the
+  design and behaviour are already published here as AI-generated work, so a
+  later independent implementation of the same feature set is unlikely to
+  qualify as an original creation for registration purposes.
 
 ---
 
