@@ -19,3 +19,10 @@ third_party/
 # MSVC object files
 *.obj
 
+
+# CI scratch
+out/
+obs.zip
+qt6.zip
+stage/
+obs/

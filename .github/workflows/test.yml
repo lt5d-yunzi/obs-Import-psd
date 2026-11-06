@@ -1,0 +1,53 @@
+name: test
+
+on:
+  push:
+    branches: [main, windows]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The PSD codec has no OBS or Qt dependency, so it builds and tests anywhere
+  # with a C++ compiler. This job gives fast feedback on every push without
+  # waiting for the full platform builds.
+  codec:
+    name: PSD codec tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch third-party headers
+        run: ./fetch-deps.sh
+        env:
+          QT_LIB_DIR: ""
+          # The codec only needs miniz and stb; skip the Qt/OBS parts if the
+          # script cannot find them on this runner.
+          SKIP_OBS_HEADERS: "1"
+          SKIP_QT_HEADERS: "1"
+
+      - name: Build and run the codec tests
+        run: |
+          set -euo pipefail
+          CXX=${CXX:-c++}
+          FLAGS="-std=c++17 -O2 -Isrc -Ithird_party/miniz"
+          SRCS="src/psd/psd_read.cpp src/psd/psd_write.cpp src/psd/psd_buf.cpp \
+                src/psd/rle.cpp src/psd/psd_text.cpp src/psd/psd_descriptor.cpp \
+                third_party/miniz/miniz.c third_party/miniz/miniz_tdef.c \
+                third_party/miniz/miniz_tinfl.c third_party/miniz/miniz_zip.c"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            SYSROOT="-isysroot $(xcrun --show-sdk-path)"
+            LINK="-Xlinker -ld_classic"
+          else
+            SYSROOT=""
+            LINK=""
+          fi
+          mkdir -p out
+          $CXX $FLAGS $SYSROOT tests/psd_test.cpp $SRCS -o out/psd_test $LINK
+          ./out/psd_test

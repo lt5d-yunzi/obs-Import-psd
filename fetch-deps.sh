@@ -27,7 +27,9 @@ say() { printf '\033[1m==> %s\033[0m\n' "$*"; }
 
 # ---------------------------------------------------------------- OBS headers
 # libobs + frontend-api public headers, from the pinned OBS release.
-if [ ! -d "$TP/obs-headers/libobs" ]; then
+if [ "${SKIP_OBS_HEADERS:-0}" = "1" ]; then
+  say "OBS headers skipped (SKIP_OBS_HEADERS=1)"
+elif [ ! -d "$TP/obs-headers/libobs" ]; then
   say "OBS headers (32.2.2)"
   OBS_TAG=32.2.2
   curl -fsSL "https://github.com/obsproject/obs-studio/archive/refs/tags/${OBS_TAG}.tar.gz" \
@@ -56,8 +58,26 @@ fi
 # ------------------------------------------------------------- Qt headers
 # Only the Qt headers reachable from QDialog/QPushButton/QColorDialog are needed.
 # On macOS they ship inside OBS.app, so copy them from there.
-if [ ! -d "$TP/qt-headers/include" ]; then
+if [ "${SKIP_QT_HEADERS:-0}" = "1" ]; then
+  say "Qt headers skipped (SKIP_QT_HEADERS=1)"
+elif [ ! -d "$TP/qt-headers/include" ]; then
   say "Qt headers from $QT_DIR"
+  if [ ! -d "$QT_DIR/QtWidgets.framework" ]; then
+    # No OBS.app (CI, or a machine without OBS installed): fall back to a
+    # Homebrew Qt, which ships the same public headers.
+    for candidate in \
+      "${QT_LIB_DIR:-}" \
+      "$(brew --prefix qt 2>/dev/null)/lib" \
+      /opt/homebrew/opt/qt/lib \
+      /usr/local/opt/qt/lib; do
+      [ -n "$candidate" ] || continue
+      if [ -d "$candidate/QtWidgets.framework" ]; then
+        QT_DIR="$candidate"
+        say "Qt headers from Homebrew: $QT_DIR"
+        break
+      fi
+    done
+  fi
   if [ ! -d "$QT_DIR/QtWidgets.framework" ]; then
     echo "error: QtWidgets.framework not found under $QT_DIR" >&2
     echo "       set QT_DIR to a Qt installation with the same headers" >&2
