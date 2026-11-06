@@ -198,6 +198,25 @@ std::string portable_config_dir()
 //   <user config>/obs-studio/obs-psd/<scene>/
 // The files must outlive the OBS process because the scene stores their paths;
 // writing to $TMPDIR made every layer disappear after a restart.
+// Directory-safe form of a scene name: it becomes a directory component, and the
+// same value is what the log line shows, so the log never carries an absolute
+// path (which would leak the user's home directory into bug reports).
+std::string safe_dir_name(const std::string &name)
+{
+	std::string safe;
+	safe.reserve(name.size());
+	for (char c : name) {
+		const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+				c == '-' || c == '_' || c == ' ';
+		safe.push_back(ok ? c : '_');
+	}
+	while (!safe.empty() && safe.back() == ' ')
+		safe.pop_back();
+	if (safe.empty())
+		safe = "scene";
+	return safe;
+}
+
 std::string make_scene_image_dir(const std::string &scene_name)
 {
 	std::string dir;
@@ -214,20 +233,7 @@ std::string make_scene_image_dir(const std::string &scene_name)
 	if (dir.empty())
 		dir = "/tmp/obs-psd";
 
-	// Sanitise the scene name: it becomes a directory component.
-	std::string safe;
-	safe.reserve(scene_name.size());
-	for (char c : scene_name) {
-		const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' ||
-				c == '_' || c == ' ';
-		safe.push_back(ok ? c : '_');
-	}
-	while (!safe.empty() && safe.back() == ' ')
-		safe.pop_back();
-	if (safe.empty())
-		safe = "scene";
-
-	dir += "/" + safe;
+	dir += "/" + safe_dir_name(scene_name);
 	os_mkdirs(dir.c_str());
 	return dir;
 }
@@ -928,7 +934,9 @@ bool build_scene_from_psd(const psd::Document &doc, const char *scene_name, std:
 	// Layer PNGs are written next to the OBS config so the saved scene can find
 	// them after a restart.
 	g_scene_image_dir = make_scene_image_dir(scene_name);
-	blog(LOG_INFO, "[obs-psd] layer images -> %s", g_scene_image_dir.c_str());
+	// Log only the part below the OBS config root: the absolute path contains the
+	// user's home directory, which does not belong in a bug report.
+	blog(LOG_INFO, "[obs-psd] layer images -> <obs-config>/obs-psd/%s", safe_dir_name(scene_name).c_str());
 	if (doc.width <= 0 || doc.height <= 0) {
 		err = "document has no size";
 		return false;

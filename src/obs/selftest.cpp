@@ -139,7 +139,13 @@ void run_selftest()
 	}
 
 	report("=== obs-psd selftest ===");
-	report("input: %s", input.c_str());
+	// Report the file name only: the absolute path contains the user's home
+	// directory and this log is meant to be shareable.
+	{
+		const size_t slash = input.find_last_of("/\\");
+		const std::string base = slash == std::string::npos ? input : input.substr(slash + 1);
+		report("input: %s", base.c_str());
+	}
 
 	remove_old_selftest_scenes();
 
@@ -186,7 +192,11 @@ void run_selftest()
 		}
 		report("layer PNGs: %zu file(s), %.2f MB", files.size(), double(bytes) / (1024.0 * 1024.0));
 		if (!files.empty())
-			report("first PNG: %s", files.front().c_str());
+			{
+				const std::string &p = files.front();
+				const size_t slash = p.find_last_of("/\\");
+				report("first PNG: %s", (slash == std::string::npos ? p : p.substr(slash + 1)).c_str());
+			}
 
 		write_missing_fonts();
 
