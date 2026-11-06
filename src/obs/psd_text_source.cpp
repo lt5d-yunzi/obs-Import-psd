@@ -37,9 +37,9 @@ struct PsdText {
 	int canvas_width = 0;
 	int canvas_height = 0;
 
-	double color_r() const { return double((color >> 16) & 0xFF) / 255.0; }
+	double color_r() const { return double(color & 0xFF) / 255.0; }
 	double color_g() const { return double((color >> 8) & 0xFF) / 255.0; }
-	double color_b() const { return double(color & 0xFF) / 255.0; }
+	double color_b() const { return double((color >> 16) & 0xFF) / 255.0; }
 	double color_a() const { return double((color >> 24) & 0xFF) / 255.0; }
 
 	// Rasterised bitmap plus the texture built from it.
@@ -62,11 +62,14 @@ struct PsdText {
 std::mutex g_tex_mutex;
 
 // obs_data colours are ABGR with alpha in the high byte.
+// OBS stores colours as 0xAABBGGRR, so reading from the low byte up gives
+// R, G, B in that order (the previous version had R and B swapped, which turned
+// a red fill blue).
 void unpack_color(uint32_t abgr, double out[4])
 {
-	out[0] = double((abgr >> 16) & 0xFF) / 255.0; // R
+	out[0] = double(abgr & 0xFF) / 255.0;         // R (low byte)
 	out[1] = double((abgr >> 8) & 0xFF) / 255.0;  // G
-	out[2] = double(abgr & 0xFF) / 255.0;         // B
+	out[2] = double((abgr >> 16) & 0xFF) / 255.0; // B
 	out[3] = double((abgr >> 24) & 0xFF) / 255.0; // A
 	if (out[3] <= 0.0)
 		out[3] = 1.0;
