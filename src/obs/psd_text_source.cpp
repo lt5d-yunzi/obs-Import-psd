@@ -37,6 +37,11 @@ struct PsdText {
 	int canvas_width = 0;
 	int canvas_height = 0;
 
+	double color_r() const { return double((color >> 16) & 0xFF) / 255.0; }
+	double color_g() const { return double((color >> 8) & 0xFF) / 255.0; }
+	double color_b() const { return double(color & 0xFF) / 255.0; }
+	double color_a() const { return double((color >> 24) & 0xFF) / 255.0; }
+
 	// Rasterised bitmap plus the texture built from it.
 	std::vector<uint8_t> rgba;        // straight alpha, width*height*4
 	int width = 0;
@@ -193,6 +198,8 @@ void psd_text_apply_settings(PsdText *ctx, obs_data_t *settings)
 
 	ctx->font_size = obs_data_get_double(settings, "size");
 	ctx->color = uint32_t(obs_data_get_int(settings, "color1"));
+	blog(LOG_INFO, "[obs-psd-text] color1 raw=0x%08X -> RGBA(%.2f,%.2f,%.2f,%.2f)", ctx->color,
+	     ctx->color_r(), ctx->color_g(), ctx->color_b(), ctx->color_a());
 	ctx->stroke = obs_data_get_bool(settings, "stroke");
 	ctx->stroke_width = obs_data_get_double(settings, "stroke_width");
 	ctx->stroke_color = uint32_t(obs_data_get_int(settings, "stroke_color"));
