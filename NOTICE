@@ -34,5 +34,11 @@ under the direction of a human author.  Consequently:
   commercially, provided the GPL obligations are met — but not for the
   authorship claims described here.
 
-If you need a registrable implementation, write your own from the ideas in this
-repository rather than reusing this code.
+* 即使换人重写也不构成独创性：本项目的功能、设计与实现已经以 AI 生成的形式
+  公开发布，相同功能的技术方案已进入公有领域可查范围，后写的实现难以再被
+  认定为"独立创作"，因此同样不适合作为软著登记标的。
+
+* Rewriting the same functionality does not restore originality either: the
+  design and behaviour are already published here as AI-generated work, so a
+  later independent implementation of the same feature set is unlikely to
+  qualify as an original creation for registration purposes.
