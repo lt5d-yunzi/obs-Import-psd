@@ -149,6 +149,86 @@ third_party/            stb、simde、OBS 头文件、Qt 头文件
 * 不透明度在导入时烘焙进 PNG alpha（OBS 公共 API 没有场景项透明度）。
 
 
+## 许可证（务必先读）
+
+本项目以 **GNU General Public License v2.0 或更高版本（GPL-2.0-or-later）** 发布，
+完整条款见仓库根目录的 [LICENSE](LICENSE)。
+
+### 为什么是 GPL
+
+本插件**链接 OBS Studio 的 libobs**，而 libobs 本身是 GPL-2.0-or-later。
+GPL 的传染性决定了：链接它的插件必须同样以 GPL 发布。这不是选择，是唯一的合法途径。
+
+### 你可以做什么
+
+* ✅ **自由使用**，包括直播、录屏、商业直播、任何用途
+* ✅ **自由修改**，改成你需要的任何样子
+* ✅ **自由再分发**，包括原版和你的修改版
+* ✅ **自己用不开源也完全没问题**（GPL 只在**分发**时生效）
+
+### 你必须做什么（分发时）
+
+如果你把编译好的 `obs-psd.plugin` 或修改版发给别人、传到网盘、做成安装包，则必须：
+
+1. **同时提供完整源代码**（附上本仓库链接即可）
+2. **保留原有的版权声明和许可证声明**（源码里的 SPDX 头不要删）
+3. **修改过的文件要注明改了什么**
+4. **继续使用 GPL-2.0-or-later**，不能改成别的协议
+5. **不能附加任何额外限制**（详见下一条）
+
+### 关于“收费”和“商用”
+
+**GPL 第 6 条明确规定：分发者不得对接收者行使 GPL 授予的权利附加任何进一步限制。**
+
+具体后果：
+
+* **任何人**在法律上都可以修改本代码并用于商业用途，**但不能改成闭源**
+* 想靠本插件赚钱的人**必须开源**，而且收到的人可以在 GPL 下**自由免费再分发**
+* 所以现实情况是：**靠卖 GPL 软件本身基本赚不到钱**，因为拿到的人随时可以免费送
+
+**作者的态度**：本项目**永远免费提供**。如果你在某个地方遇到对它的收费下载，
+请直接从这个仓库免费获取。作者的代码不允许任何人做成闭源商业产品。
+
+### AI 生成声明（重要）
+
+本项目绝大部分代码由 AI 编码代理生成（DeepSeek Harness），
+由人类作者 [@lt5d-yunzi](https://github.com/lt5d-yunzi) 提出需求、验证结果并决定设计方向。
+
+由此产生以下事实，请在使用前知晓：
+
+* **本项目不能用于在中国申请计算机软件著作权（软著）登记。**
+  中国版权保护中心要求申请作品须由人类作者独立创作完成，AI 生成内容
+  不构成“独创性”，无法作为软著登记的主体。**任何人（包括原作者）
+  都不应将本项目或其派生作品用于软著申请。**
+* 同理，本项目**不适合**用于需要证明“人类独立创作”的场合
+  （学术成果认定、职称评审、竞赛原创性审查等）。
+* 代码按 GPL 正常授权，**法律上可用于商业用途**（见上一条），
+  但**不得**用于上述登记/认定场景。
+* 如果你需要一份可以申请软著的实现，应基于本项目的思路
+  **由人类重新独立编写**。
+
+### 第三方代码
+
+`third_party/` 目录不包含在本仓库中，由 `fetch-deps.sh` 按需下载：
+
+| 依赖 | 许可证 |
+|---|---|
+| libobs / obs-frontend-api 头文件（OBS 32.2.2） | GPL-2.0-or-later |
+| Qt 头文件（随 OBS.app 分发） | LGPL-3.0 |
+| simde 0.8.2 | MIT |
+| miniz 3.0.2 | MIT / public domain |
+| stb_image_write.h | public domain / MIT |
+
+### 无担保
+
+```
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+```
+
+
 ---
 
 ## English
@@ -233,9 +313,48 @@ See the Chinese section below for the full list — in short:
 5. Layer positions are baked into full-canvas bitmaps to dodge OBS group coordinates,
    which makes the PNGs larger.
 
-### Licence
+### Licence (read this first)
 
-GPL-2.0-or-later, matching OBS Studio (the plugin links against libobs).
+Released under the **GNU General Public License v2.0 or later**; the full text
+is in [LICENSE](LICENSE).
+
+**Why GPL**: the plugin links against OBS Studio's libobs, which is
+GPL-2.0-or-later. GPL's copyleft means a plugin linking it must ship under the
+same terms — this is not a preference, it is the only lawful option.
+
+**You may**: use it for anything (streaming, recording, commercial broadcasts),
+modify it freely, redistribute it, and keep your own changes private as long as
+you do not distribute them.
+
+**If you distribute it** (binaries, a fork, an installer), you must ship the
+complete corresponding source (linking this repository is enough), keep the
+copyright and SPDX notices, mark modified files, stay on GPL-2.0-or-later, and
+add no further restrictions.
+
+**About selling it**: GPL section 6 forbids extra restrictions, so anyone may
+use this code commercially — but they must keep it open, and everyone who
+receives it may redistribute it for free. In practice a paid copy cannot
+survive; the author's intent is that this project is always free, and if you
+find a paid mirror, get it here instead.
+
+### AI-generated code (important)
+
+Most of this codebase was produced by an AI coding agent (DeepSeek Harness)
+directed, reviewed and accepted by the human author
+[@lt5d-yunzi](https://github.com/lt5d-yunzi).
+
+Consequences you should know before reuse:
+
+* **This project cannot be used to register a computer software copyright
+  (软件著作权登记) in China.** The registration process requires a work of
+  human authorship; AI-generated content does not qualify as original
+  expression, so neither this project nor a derivative may be filed. The same
+  applies to academic credit, promotion review, or originality screening for
+  competitions.
+* The code is still licensed under the GPL and may be used commercially
+  (see above); it just may not be used for those claims of authorship.
+* If you need a registrable implementation, write one yourself from the ideas
+  here instead of copying this code.
 
 ---
 

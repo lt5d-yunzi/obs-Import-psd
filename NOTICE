@@ -1,0 +1,38 @@
+obs-Import-psd
+==============
+
+Copyright (C) 2026 鲸鱼少女 (Whale Girl) and @lt5d-yunzi
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 2 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE.  See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program.  If not, see <https://www.gnu.org/licenses/>.
+
+
+AI-GENERATED WORK — 重要声明 / IMPORTANT
+-----------------------------------------
+
+Most of this codebase was produced by an AI coding agent (DeepSeek Harness)
+under the direction of a human author.  Consequently:
+
+* 本项目**不能用于在中国申请计算机软件著作权（软著）登记**。
+  中国版权保护中心要求申请作品由人类独立创作完成；AI 生成内容不构成独创性，
+  无法作为软著登记的主体。任何派生作品同样不适用于软著申请。
+
+* This project MUST NOT be used to register a computer software copyright in
+  China, nor for academic credit, promotion review, or originality screening,
+  because AI-generated content does not constitute human authorship.
+
+* The code is licensed under the GPL as stated above and may be used
+  commercially, provided the GPL obligations are met — but not for the
+  authorship claims described here.
+
+If you need a registrable implementation, write your own from the ideas in this
+repository rather than reusing this code.
