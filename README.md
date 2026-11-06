@@ -7,8 +7,6 @@
 [![OBS](https://img.shields.io/badge/OBS-32.x-blue)]()
 [![License](https://img.shields.io/badge/license-GPL--2.0--or--later-green)]()
 
-[![build](https://github.com/lt5d-yunzi/obs-Import-psd/actions/workflows/build.yml/badge.svg)](https://github.com/lt5d-yunzi/obs-Import-psd/actions/workflows/build.yml)
-[![test](https://github.com/lt5d-yunzi/obs-Import-psd/actions/workflows/test.yml/badge.svg)](https://github.com/lt5d-yunzi/obs-Import-psd/actions/workflows/test.yml)
 
 **[English](#english) · [中文](#中文) · [未修复的 Bug](#未修复的-bug截至最后一次提交)**
 
@@ -143,17 +141,9 @@ together with **@lt5d-yunzi**.
 
 `fetch-deps.sh` 只下载构建必需的公共头文件；`build.sh` 在 `third_party/` 缺失时会自动调用它。
 
-### 自动构建（GitHub Actions）
-
-| 工作流 | 触发 | 产物 |
-|---|---|---|
-| `build.yml` | push / PR / 手动 | `obs-psd-macos-arm64.zip`、`obs-psd-windows-x64.zip`（Actions 页面下载） |
-| `test.yml` | push / PR | PSD 编解码测试（Linux + macOS 双跑，不需要 OBS/Qt） |
-
-`build.yml` 自己下载 OBS 32.2.2 的发行包和 obs-deps 的 Qt 6，
-所以 **fork 之后不用做任何配置**，推上去就能跑。
-
-给某个提交打 tag 会额外触发一次构建，方便发布。
+> **本仓库不提供预编译二进制**，也不做自动构建 —— 请按上面的步骤在本地编译。
+> 原因：插件必须针对你安装的 OBS 版本链接（macOS 的 `libobs.framework`、
+> Windows 的 `obs.dll` 导出库），交叉构建出来的二进制换台机器大概率加载失败。
 
 ### 构建要求
 
