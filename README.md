@@ -18,6 +18,11 @@
 | macOS arm64 | `main` | `./build.sh` | 原生开发线，CoreText 文本渲染 |
 | Windows x64 | `windows` | `build-win.ps1` | CMake + MSVC，Qt 文本渲染，链接已安装的 OBS DLL |
 
+> **文本图层**：勾选「始终使用 OBS 文本源」后会创建自建源类型 `obs_psd_text_source`
+> （不要在 OBS 里手选，它不是给用户直接添加的）。它用 CoreText / Qt 光栅化，
+> 属性面板可改文字、字体（下拉框）、字号、填充色、描边开关/宽度/颜色。
+> 不勾选则渲染成位图，外观最精确但不可编辑。
+
 两条线共享 `src/psd/`、`src/obs/`、`src/ui/` 与 `tests/`；`windows` 分支在此基础上增加
 CMake 工程、Qt 文本渲染器、UTF-8 路径支持以及 Windows 端验证记录。
 
@@ -349,10 +354,21 @@ GPL-2.0-or-later, matching OBS Studio (the plugin links against libobs).
 
 以下是**确认存在、尚未修好**的问题。按影响排序。
 
-## 1. `text_ft2_source_v2` 导入后渲染为 0×0（未修复）
+## 0. 本轮已解决的历史问题（留档）
 
-**现象**：勾选「始终使用 OBS 文本源」后，文字图层能创建出 `text_ft2_source_v2` 源，
-但源尺寸恒为 `0x0`，画面上是空的。
+| 问题 | 根因 | 修法 |
+|---|---|---|
+| 文本源渲染为 `0x0` | OBS 内置 `text_ft2_source_v2` 不认 CoreText 报出的字体名，且 `font` 是嵌套对象而非字符串 | 自建 `obs_psd_text_source`（异步视频源），CoreText 光栅化后交给 OBS |
+| 文本位置错误 | 文本位图只是文字尺寸，却按全画布项摆放；`pad` 依赖时序 | 文本源也渲染**整幅画布**，与图片层走完全相同的摆放逻辑 |
+| 重启后文本不显示 | 异步源只在激活时才渲染收到的帧，而场景在渲染器就绪前就被激活 | `load()` 回调 + 唤醒期每帧重推（缓存帧，只重发不重算） |
+| 选红色显示蓝色 | `unpack_color()` 从 `(v>>16)` 读 R，但 OBS 是 `0xAABBGGRR`（R 在最低字节） | R 从 `v & 0xFF` 读，G `>>8`，B `>>16` |
+| 属性面板没字体 | `obs_properties_add_font` 的嵌套对象经过 `obs_source_create` 后总是空的 | 改成字符串下拉框，绑定 `font_name`，列出本机 74 个中文字体 |
+| 缺字体无提示 | 位图路径记录 `MissingFont` 时没填 `suggestions` | 补齐建议列表，对话框列出本机相近字体 |
+
+## 1. ~~`text_ft2_source_v2` 导入后渲染为 0×0~~（已用自建文本源绕过）
+
+**保留本节作为记录**：OBS 自带的文本源在本机对 CoreText 报出的字体名始终渲染 `0x0`，
+试过 6 种配置组合均无效（详见下方尝试表）。现在不再使用它。
 
 **已尝试且失败**（日志确认每一步都生效）：
 
