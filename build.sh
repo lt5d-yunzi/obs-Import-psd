@@ -60,10 +60,41 @@ rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources/locale" "$BUNDLE/Contents/Resources/data/locale"
 
 echo "== compiling =="
-clang++ "${CXX_FLAGS[@]}" \
-  "${SOURCES[@]}" \
+# miniz is C, and compiling it as C++ breaks on a const array declaration
+# (miniz_tdef.c declares s_tdefl_num_probes twice: once bare, once initialised).
+# Build the C files with the C driver and link everything together at the end.
+C_SOURCES=()
+CXX_SOURCES=()
+for src in "${SOURCES[@]}"; do
+  case "$src" in
+    *.c) C_SOURCES+=("$src") ;;
+    *) CXX_SOURCES+=("$src") ;;
+  esac
+done
+
+OBJS=()
+for src in "${C_SOURCES[@]}"; do
+  obj="$OUT/$(echo "$src" | tr '/' '_').o"
+  clang -std=c11 -O2 -fPIC -fvisibility=hidden \
+    -isysroot "$SDK" -I"$HERE/third_party/miniz" \
+    -c "$src" -o "$obj"
+  OBJS+=("$obj")
+done
+for src in "${CXX_SOURCES[@]}"; do
+  obj="$OUT/$(echo "$src" | tr '/' '_').o"
+  if [ "${src##*.}" = "mm" ]; then
+    clang++ "${CXX_FLAGS[@]}" -x objective-c++ -c "$src" -o "$obj"
+  else
+    clang++ "${CXX_FLAGS[@]}" -c "$src" -o "$obj"
+  fi
+  OBJS+=("$obj")
+done
+
+clang++ "${OBJS[@]}" \
   -o "$BUNDLE/Contents/MacOS/$NAME" \
   -bundle -undefined dynamic_lookup \
+  -isysroot "$SDK" \
+  -F"$FW" \
   -framework libobs \
   -framework CoreText \
   -framework CoreGraphics \
