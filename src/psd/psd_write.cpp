@@ -12,6 +12,7 @@
 //   flattened composite, RLE, 3 channels (no alpha)
 #include "psd.h"
 #include "impl/psd_common.h"
+#include "psd_file.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -672,7 +673,7 @@ bool write_file(const std::string &path, const Document &doc, std::string &error
         error = "internal error: empty serialisation";
         return false;
     }
-    FILE *f = std::fopen(path.c_str(), "wb");
+    FILE *f = detail::fopen_utf8(path, "wb");
     if (f == nullptr) {
         error = "cannot open output file: " + path;
         return false;
@@ -682,7 +683,7 @@ bool write_file(const std::string &path, const Document &doc, std::string &error
     const bool close_ok = std::fclose(f) == 0;
     if (wrote != n || !flush_ok || !close_ok) {
         error = "failed to write whole file";
-        std::remove(path.c_str());
+        detail::remove_utf8(path);
         return false;
     }
     return true;

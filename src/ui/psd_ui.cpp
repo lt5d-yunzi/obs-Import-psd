@@ -198,23 +198,33 @@ void run_import_dialog()
     // which font to install to get the original look back.
     const std::vector<MissingFont> fonts = missing_fonts();
     if (!fonts.empty()) {
-        QStringList lines;
+        QStringList blocks;
         std::string seen;
         for (const MissingFont &f : fonts) {
             if (seen.find("|" + f.wanted + "|") != std::string::npos)
                 continue;
             seen += "|" + f.wanted + "|";
-            lines << QObject::tr("  %1  (used %2 instead)")
-                         .arg(QString::fromStdString(f.wanted))
-                         .arg(QString::fromStdString(f.used));
+
+            QString block = QObject::tr("PSD 字体：%1").arg(QString::fromStdString(f.wanted));
+            if (!f.suggestions.empty()) {
+                QStringList picks;
+                for (const std::string &s : f.suggestions)
+                    picks << QString::fromStdString(s);
+                block += "\n" + QObject::tr("  本机可用的相近字体：%1").arg(picks.join("、"));
+            } else {
+                block += "\n" + QObject::tr("  本机没有相近的字体");
+            }
+            block += "\n" + QObject::tr("  已用：%1").arg(QString::fromStdString(f.used));
+            blocks << block;
         }
-        QMessageBox box(QMessageBox::Warning, QObject::tr("Missing fonts", "obs-psd"),
-                        QObject::tr("This PSD uses fonts that are not installed, so those text "
-                                    "layers were rendered with a similar system font:\n\n%1\n\n"
-                                    "Install the font(s) and re-import to match the original "
-                                    "exactly. Search the foundry or a font site for the PostScript "
-                                    "name shown above.")
-                            .arg(lines.join("\n")),
+        QMessageBox box(QMessageBox::Warning, QObject::tr("缺少字体", "obs-psd"),
+                        QObject::tr("这个 PSD 用到了本机没有安装的字体，文字图层已用替代字体显示：\n\n"
+                                    "%1\n\n"
+                                    "想还原成原样，可以：\n"
+                                    "  1. 安装上面列出的字体后重新导入；或\n"
+                                    "  2. 在本机可用的相近字体里挑一个 —— 打开该文字图层的属性，"
+                                    "把字体改成其中之一即可。")
+                            .arg(blocks.join("\n\n")),
                         QMessageBox::Ok, main_parent());
         box.exec();
     }
@@ -243,8 +253,8 @@ void run_export_dialog()
 
     auto *form = new QFormLayout();
     auto *path_edit = new QLineEdit(&dlg);
-    QString default_dir = QString::fromUtf8(getenv("HOME") ? getenv("HOME") : "~");
-    path_edit->setText(default_dir + "/" + scene_name + ".psd");
+    const QString default_dir = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    path_edit->setText(QDir(default_dir).filePath(scene_name + ".psd"));
     auto *browse = new QPushButton(QObject::tr("Browse..."), &dlg);
     QObject::connect(browse, &QPushButton::clicked, &dlg, [&]() {
         const QString p = QFileDialog::getSaveFileName(main_parent(), QObject::tr("Save PSD"),
@@ -285,12 +295,11 @@ void run_export_dialog()
             ExportOptions opts;
             opts.extra_ignore_ids = extra_edit->text().toStdString();
             ExportResult res;
-            std::string path = path_edit->text().toStdString();
-            if (path.size() < 4 || path.compare(path.size() - 4, 4, ".psd") != 0 ||
-                path.compare(path.size() - 4, 4, ".PSD") != 0)
+            QString path = path_edit->text();
+            if (!path.endsWith(".psd", Qt::CaseInsensitive))
                 path += ".psd";
 
-            const bool ok = export_scene_to_psd(scene, path, opts, res);
+            const bool ok = export_scene_to_psd(scene, path.toStdString(), opts, res);
 
             QStringList lines;
             for (const auto &it : res.items) {

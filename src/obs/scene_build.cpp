@@ -92,7 +92,9 @@
 // =============================================================================
 
 #include "scene_build.h"
+#include "psd_text_source.h"
 #include "obs/text_render.h"
+#include "../psd/psd_file.h"
 
 #include <obs.h>
 #include <obs-frontend-api.h>
@@ -102,22 +104,33 @@
 #include <util/threading.h>
 
 #include <algorithm>
+#include <array>
+#include <map>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 // Third-party (vendored) header: silence its unrelated diagnostics only.
+#ifdef __clang__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wmissing-field-initializers"
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
+#ifdef __clang__
 #pragma clang diagnostic pop
+#endif
 
 namespace obspsd {
 
@@ -132,17 +145,71 @@ std::vector<std::string> *g_kept_files = nullptr; // heap: no static dtor racing
 std::string g_scene_image_dir;                    // where this scene's PNGs live
 std::vector<MissingFont> g_missing_fonts;        // from the most recent build
 
+// Windows portable mode keeps everything under the OBS directory
+// (<root>/config/obs-studio) instead of %APPDATA%.  libobs'
+// os_get_config_path_ptr() knows nothing about it (portable mode is a frontend
+// concept), so a scene imported into a portable OBS would otherwise reference
+// PNGs in %APPDATA% and stop working when the portable folder is moved.
+#ifdef _WIN32
+std::string portable_config_dir()
+{
+	HMODULE module = nullptr;
+	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCWSTR>(&portable_config_dir), &module))
+		return {};
+
+	wchar_t path[MAX_PATH] = {};
+	const DWORD len = GetModuleFileNameW(module, path, MAX_PATH);
+	if (len == 0 || len >= MAX_PATH)
+		return {};
+
+	std::wstring root(path, len);
+	// <root>\obs-plugins\64bit\obs-psd.dll -> <root>
+	for (int i = 0; i < 3; ++i) {
+		const size_t slash = root.find_last_of(L"\\/");
+		if (slash == std::wstring::npos)
+			return {};
+		root.resize(slash);
+	}
+
+	const std::wstring markers[] = {root + L"\\portable_mode.txt", root + L"\\obs_portable_mode.txt",
+					root + L"\\portable_mode", root + L"\\obs_portable_mode"};
+	bool portable = false;
+	for (const std::wstring &m : markers) {
+		if (GetFileAttributesW(m.c_str()) != INVALID_FILE_ATTRIBUTES) {
+			portable = true;
+			break;
+		}
+	}
+	if (!portable)
+		return {};
+
+	const std::wstring dir = root + L"\\config\\obs-studio\\obs-psd";
+	const int need = WideCharToMultiByte(CP_UTF8, 0, dir.c_str(), -1, nullptr, 0, nullptr, nullptr);
+	if (need <= 1)
+		return {};
+	std::string out(size_t(need - 1), '\0');
+	WideCharToMultiByte(CP_UTF8, 0, dir.c_str(), -1, out.data(), need, nullptr, nullptr);
+	return out;
+}
+#endif
+
 // Directory that holds the PNGs of one imported scene:
 //   <user config>/obs-studio/obs-psd/<scene>/
 // The files must outlive the OBS process because the scene stores their paths;
 // writing to $TMPDIR made every layer disappear after a restart.
 std::string make_scene_image_dir(const std::string &scene_name)
 {
-	char *base = os_get_config_path_ptr("obs-studio/obs-psd");
 	std::string dir;
-	if (base != nullptr) {
-		dir = base;
-		bfree(base);
+#ifdef _WIN32
+	dir = portable_config_dir();
+#endif
+	if (dir.empty()) {
+		char *base = os_get_config_path_ptr("obs-studio/obs-psd");
+		if (base != nullptr) {
+			dir = base;
+			bfree(base);
+		}
 	}
 	if (dir.empty())
 		dir = "/tmp/obs-psd";
@@ -192,6 +259,15 @@ void apply_opacity(std::vector<uint8_t> &rgba, float opacity)
 // the scene item is always placed at (0,0) with scale 1, so the result does not
 // depend on how OBS interprets per-item transforms (which shifted items when a
 // group or a bounds mode was involved).
+// stbi_write_png_to_func() callback: write the encoded PNG straight to a FILE*
+// that was opened with the UTF-8-aware fopen.
+void write_png_bytes(void *context, void *data, int size)
+{
+	FILE *f = static_cast<FILE *>(context);
+	if (size > 0)
+		std::fwrite(data, 1, size_t(size), f);
+}
+
 bool write_layer_png(const psd::Layer &layer, int canvas_w, int canvas_h, bool full_canvas,
 		     std::string &path_out, std::string &err)
 {
@@ -241,7 +317,19 @@ bool write_layer_png(const psd::Layer &layer, int canvas_w, int canvas_h, bool f
 		path = make_scene_image_path(g_scene_image_dir);
 	}
 
-	if (!stbi_write_png(path.c_str(), out_w, out_h, 4, pixels.data(), out_w * 4)) {
+	// stb_image_write opens files with fopen(), which mangles non-ASCII paths on
+	// Windows.  Render into a callback that writes through our UTF-8-aware
+	// helper instead.
+	FILE *png_file = psd::detail::fopen_utf8(path, "wb");
+	if (png_file == nullptr) {
+		err = "could not write layer PNG: " + path;
+		return false;
+	}
+	bool png_ok = stbi_write_png_to_func(write_png_bytes, png_file, out_w, out_h, 4, pixels.data(), out_w * 4) != 0;
+	if (std::fclose(png_file) != 0)
+		png_ok = false;
+	if (!png_ok) {
+		psd::detail::remove_utf8(path);
 		err = "could not write layer PNG: " + path;
 		return false;
 	}
@@ -292,17 +380,21 @@ Placement compute_placement(const psd::Document &doc, SceneBuildOptions::Placeme
 	return p;
 }
 
-void place_item(obs_sceneitem_t *item, const psd::Layer &layer, const Placement &p)
+void place_item(obs_sceneitem_t *item, const psd::Layer &layer, const Placement &p,
+		const std::map<obs_source_t *, std::array<int, 3>> *text_offsets = nullptr)
 {
-	// Layers are written as full-canvas images (see write_layer_png), so the
-	// item's own position inside its image is already correct: pin it to the
-	// canvas origin and only apply the document->canvas scale. This avoids every
-	// per-item coordinate computation OBS performs for partial images.
-	(void)layer;
 	obs_sceneitem_set_alignment(item, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
 	obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_NONE);
 
 	struct vec2 pos;
+	// Image layers are written as full-canvas bitmaps (see write_layer_png), so
+	// their content already carries the document offset and the item sits at the
+	// canvas origin. A PSD text source only rasterises the glyphs, so its item
+	// has to be placed at the layer rectangle's position instead.
+	// Every layer - image or text - is now a full-canvas bitmap whose glyphs are
+	// already at their document position, so the item always sits at the origin
+	// and only takes the document->canvas scale. No per-type special case.
+	(void)text_offsets;
 	vec2_set(&pos, 0.0f, 0.0f);
 	obs_sceneitem_set_pos(item, &pos);
 
@@ -329,6 +421,8 @@ void apply_blending(obs_sceneitem_t *item, const psd::Layer &layer)
 struct BuildState {
 	std::vector<obs_source_t *> images; // every image source we created (refs held)
 	std::string err;
+	int canvas_w = 0;
+	int canvas_h = 0;
 	// Text styling, taken from SceneBuildOptions when the user set it.
 	bool text_style_valid = false;
 	double text_color[4] = {0.8, 0.6, 0.8, 1.0};
@@ -337,7 +431,96 @@ struct BuildState {
 	double text_stroke_color[4] = {1, 1, 1, 1};
 	std::vector<MissingFont> missing_fonts;
 	bool text_force_obs_source = false;
+	// offset (document position, pad) for each text source we created, so the
+	// post-load reposition pass does not have to trust the source's settings.
+	std::map<obs_source_t *, std::array<int, 3>> text_offsets;
+	std::map<std::string, std::array<int, 3>> text_offsets_by_name;
 };
+
+// Builds an editable obs_psd_text_source for a PSD type layer.
+obs_source_t *create_psd_text_source(BuildState &st, const psd::Layer &layer)
+{
+	obs_data_t *settings = obs_data_create();
+	obs_data_set_string(settings, "text", layer.text.c_str());
+	// The source's font property is a nested {face, style, size, flags} object
+	// (obs_properties_add_font), so the importer has to write it the same way or
+	// the property panel shows no font and the renderer loses the PSD face.
+	{
+		const std::string family = psd::font_family(layer.text_font);
+		const std::string style = psd::font_style(layer.text_font);
+		obs_data_t *font_obj = obs_data_create();
+		obs_data_set_string(font_obj, "face", family.c_str());
+		obs_data_set_string(font_obj, "style", style.c_str());
+		obs_data_set_int(font_obj, "size",
+				 int64_t(layer.text_size > 0 ? layer.text_size * 0.7 : 70));
+		obs_data_set_int(font_obj, "flags", 0);
+		// "font_name" keeps the PostScript name exactly as the PSD wrote it; the
+		// nested object is what the property editor shows and edits.
+		obs_data_set_string(settings, "font_name", layer.text_font.c_str());
+		// obs_data_set_obj() takes its own reference, but the reference it takes
+		// can be dropped once `settings` is handed to obs_source_create(); keep
+		// ours alive by transferring it instead of releasing.
+		obs_data_set_obj(settings, "font", font_obj);
+		obs_data_addref(font_obj);
+		obs_data_release(font_obj);
+		blog(LOG_INFO, "[obs-psd] text font: layer='%s' psd='%s' family='%s' style='%s'",
+		     layer.name.c_str(), layer.text_font.c_str(), family.c_str(), style.c_str());
+	}
+	obs_data_set_double(settings, "size",
+			    layer.text_size > 0 ? layer.text_size : 100.0);
+	const double *c = st.text_style_valid ? st.text_color : layer.text_color;
+	// OBS stores colours as 0xAABBGGRR (R in the LOW byte), not 0xRRGGBBAA.
+	// Getting this backwards made a red fill come out blue.
+	auto pack = [](const double rgba[4]) {
+		const uint32_t r = uint32_t(std::max(0.0, std::min(1.0, rgba[0])) * 255.0);
+		const uint32_t g = uint32_t(std::max(0.0, std::min(1.0, rgba[1])) * 255.0);
+		const uint32_t b = uint32_t(std::max(0.0, std::min(1.0, rgba[2])) * 255.0);
+		const uint32_t a = uint32_t(std::max(0.0, std::min(1.0, rgba[3])) * 255.0);
+		return (a << 24) | (b << 16) | (g << 8) | r;
+	};
+	obs_data_set_int(settings, "color1", pack(c));
+	obs_data_set_bool(settings, "stroke", st.text_style_valid ? st.text_stroke : layer.stroke_on);
+	obs_data_set_double(settings, "stroke_width",
+			    st.text_style_valid ? st.text_stroke_width : layer.stroke_size);
+	obs_data_set_int(settings, "stroke_color",
+			 pack(st.text_style_valid ? st.text_stroke_color : layer.stroke_color));
+	// The source renders only the glyphs; the document position is stored so
+	// place_item() can put the scene item at the right spot on the canvas.
+	obs_data_set_int(settings, "offset_x", layer.left);
+	obs_data_set_int(settings, "offset_y", layer.top);
+	obs_data_set_int(settings, "box_width", layer.width());
+	obs_data_set_int(settings, "box_height", layer.height());
+	// Text sources render onto the full canvas so their scene item can sit at the
+	// origin exactly like an image layer (see psd_text_source.cpp).
+	obs_data_set_int(settings, "canvas_width", st.canvas_w > 0 ? st.canvas_w : 1920);
+	obs_data_set_int(settings, "canvas_height", st.canvas_h > 0 ? st.canvas_h : 1080);
+
+	// Record a missing PSD font together with installed look-alikes so the import
+	// dialog can offer a concrete replacement instead of a bare "font missing".
+	if (!layer.text_font.empty() && !psd::font_is_usable(layer.text_font)) {
+		MissingFont mf;
+		mf.layer = layer.name;
+		mf.wanted = layer.text_font;
+		mf.used = psd::font_family(layer.text_font);
+		mf.suggestions = psd::similar_font_families(layer.text_font, 5);
+		st.missing_fonts.push_back(std::move(mf));
+	}
+
+	obs_source_t *src = obs_source_create("obs_psd_text_source", layer.name.c_str(), settings, nullptr);
+	obs_data_release(settings);
+	if (!src) {
+		blog(LOG_WARNING, "[obs-psd] could not create obs_psd_text_source for '%s'",
+		     layer.name.c_str());
+		return nullptr;
+	}
+	st.images.push_back(src);
+	st.text_offsets[src] = {layer.left, layer.top, 0};
+	st.text_offsets_by_name[layer.name] = {layer.left, layer.top, 0};
+	blog(LOG_INFO, "[obs-psd] text layer '%s' -> editable PSD text source (%ux%u) at (%d,%d)",
+	     layer.name.c_str(), obs_source_get_width(src), obs_source_get_height(src), layer.left,
+	     layer.top);
+	return src;
+}
 
 // Builds a plain OBS text source for a PSD type layer. Used when the PSD's font
 // is not installed: OBS picks a font it can actually render (and the user can
@@ -352,39 +535,41 @@ obs_source_t *create_obs_text_source(BuildState &st, const psd::Layer &layer, do
 	// no glyphs at all (it rendered 0x0). Family names differ from PostScript
 	// names ("PingFang SC" vs "PingFangSC-Semibold"), so map through the family
 	// list of the installed font.
-	// Resolve the PostScript name in the PSD to the FAMILY name OBS wants.
+	// text_ft2_source_v2 keeps the typeface in a NESTED "font" object, exactly as
+	// the OBS UI writes it:
+	//   "font": { "face": <family name>, "style": "Regular", "size": 70, "flags": 0 }
+	// Passing "font" as a plain string (or putting "size" at the top level) makes
+	// the source resolve no glyphs at all, which shows up as a 0x0 source.
 	std::string family = psd::font_family(layer.text_font);
 	if (family.empty())
 		family = "PingFang SC";
-
-	obs_data_set_string(settings, "font", family.c_str());
-	obs_data_set_string(settings, "face", family.c_str());
-	// Use the style the font actually provides ("Bold" for a Bold face); a style
-	// the face does not have leaves the source unable to build a glyph cache.
-	obs_data_set_string(settings, "style", psd::font_style(layer.text_font).c_str());
-	obs_data_set_bool(settings, "use_color", true);
-	obs_data_set_string(settings, "text_file", "");
-	obs_data_set_int(settings, "custom_width", layer.width() > 0 ? layer.width() : 1000);
+	std::string style = psd::font_style(layer.text_font);
 
 	// PSD point sizes are em sizes; 0.7 matches the glyph height ratio used by
 	// the bitmap renderer.
 	const double px = (layer.text_size > 0 ? layer.text_size * 0.7 : 48.0) * (fit > 0 ? fit : 1.0);
-	obs_data_set_int(settings, "size", (long long)(px > 1.0 ? px : 1.0));
+	const int64_t size_px = int64_t(px > 1.0 ? px : 1.0);
 
-	// OBS colours are ABGR with the alpha in the high byte.
+	obs_data_t *font_obj = obs_data_create();
+	obs_data_set_string(font_obj, "face", family.c_str());
+	obs_data_set_string(font_obj, "style", style.c_str());
+	obs_data_set_int(font_obj, "size", size_px);
+	obs_data_set_int(font_obj, "flags", 0);
+	obs_data_set_obj(settings, "font", font_obj);
+	obs_data_release(font_obj);
+
+	// Only the keys the OBS UI itself writes. Mirroring the nested object and
+	// leaving the rest at their defaults is what made the hand-made source work.
+
+	// OBS stores colours as 0xAABBGGRR (R in the low byte).
 	const double *c = st.text_style_valid ? st.text_color : layer.text_color;
-	const uint32_t r = uint32_t(std::max(0.0, std::min(1.0, c[0])) * 255.0);
-	const uint32_t g = uint32_t(std::max(0.0, std::min(1.0, c[1])) * 255.0);
-	const uint32_t b = uint32_t(std::max(0.0, std::min(1.0, c[2])) * 255.0);
-	const uint32_t color = (0xFFu << 24) | (r << 16) | (g << 8) | b;
+	const uint32_t rr = uint32_t(std::max(0.0, std::min(1.0, c[0])) * 255.0);
+	const uint32_t gg = uint32_t(std::max(0.0, std::min(1.0, c[1])) * 255.0);
+	const uint32_t bb = uint32_t(std::max(0.0, std::min(1.0, c[2])) * 255.0);
+	const uint32_t color = (0xFFu << 24) | (bb << 16) | (gg << 8) | rr;
 	obs_data_set_int(settings, "color1", color);
 	obs_data_set_int(settings, "color2", color);
 	obs_data_set_bool(settings, "outline", st.text_style_valid && st.text_stroke);
-	obs_data_set_bool(settings, "drop_shadow", false);
-	obs_data_set_int(settings, "align", OBS_ALIGN_LEFT);
-	obs_data_set_bool(settings, "word_wrap", false);
-	obs_data_set_int(settings, "antialiasing", 1);
-	obs_data_set_int(settings, "log_mode", 0);	obs_data_set_int(settings, "log_mode", 0);
 
 	// Create the source first and then apply the settings, which is exactly what
 	// the OBS UI does. text_ft2_source_v2 builds its glyph cache in
@@ -425,36 +610,39 @@ obs_source_t *create_text_source(BuildState &st, const psd::Layer &layer, double
 	for (int i = 0; i < 4; ++i)
 		req.stroke_color[i] = st.text_style_valid ? st.text_stroke_color[i] : layer.stroke_color[i];
 
-	// PSD fonts are frequently not installed. When that happens the user asked
-	// for an OBS text source instead of a rendered bitmap: it stays editable and
-	// OBS provides a font it can actually display.
-	const bool psd_font_ok = layer.text_font.empty() || psd::font_is_usable(layer.text_font);
-	blog(LOG_INFO, "[obs-psd] layer '%s' font='%s' usable=%d force=%d", layer.name.c_str(),
-	     layer.text_font.c_str(), int(psd_font_ok), int(st.text_force_obs_source));
-	if (st.text_force_obs_source || !psd_font_ok) {
-		if (psd_font_ok)
-			blog(LOG_INFO, "[obs-psd] layer '%s' forced to an OBS text source", layer.name.c_str());
-		else
-			blog(LOG_WARNING,
-			     "[obs-psd] layer '%s' uses font '%s' which is not installed; using an OBS text "
-			     "source (install the font and re-import to keep the original styling)",
-			     layer.name.c_str(), layer.text_font.c_str());
-		if (obs_source_t *fallback = create_obs_text_source(st, layer, fit))
-			return fallback;
-		// Fall through to the renderer if OBS could not create the source.
+	// PSD fonts are frequently not installed. By default the text is rasterised
+	// with a substitute system font (see the renderer), which keeps the picture
+	// faithful. The user can opt into editable OBS text sources instead; those
+	// only work when the font is present (OBS' text source cannot synthesise a
+	// missing face), so a forced source falls back to the renderer on failure.
+	// Editable text source: our own source type, which rasterises through the
+	// same CoreText path as the bitmap import but keeps text/font/colour/stroke
+	// editable in the source properties. OBS' built-in text source is not used
+	// because it renders 0x0 on macOS for CoreText face names.
+	if (st.text_force_obs_source) {
+		if (obs_source_t *src = create_psd_text_source(st, layer))
+			return src;
 	}
 
 	psd::TextRenderResult res;
 	if (!psd::render_text_layer(req, res)) {
 		blog(LOG_WARNING, "[obs-psd] could not render text layer '%s' (text='%s', font='%s')",
 		     layer.name.c_str(), layer.text.c_str(), layer.text_font.c_str());
-		return nullptr;
+		// Last resort: let OBS try to display something.
+		return create_obs_text_source(st, layer, fit);
 	}
 	if (res.font_substituted) {
 		blog(LOG_WARNING,
 		     "[obs-psd] text layer '%s' wants font '%s', which is missing here; rendered with '%s'",
 		     layer.name.c_str(), layer.text_font.c_str(), res.used_font.c_str());
-		st.missing_fonts.push_back(MissingFont{layer.name, layer.text_font, res.used_font});
+		MissingFont mf;
+		mf.layer = layer.name;
+		// Report what the PSD asked for; fall back to the face we resolved so the
+		// dialog always names something actionable.
+		mf.wanted = layer.text_font.empty() ? res.used_font : layer.text_font;
+		mf.used = res.used_font;
+		mf.suggestions = psd::similar_font_families(mf.wanted, 5);
+		st.missing_fonts.push_back(std::move(mf));
 	} else {
 		blog(LOG_INFO, "[obs-psd] text layer '%s' rendered with font '%s'", layer.name.c_str(),
 		     res.used_font.c_str());
@@ -589,7 +777,7 @@ bool add_layer(BuildState &st, obs_scene_t *parent, const psd::Layer &layer, con
 		return false;
 	}
 
-	place_item(item, layer, p);
+	place_item(item, layer, p, &st.text_offsets);
 	apply_blending(item, layer);
 	obs_sceneitem_set_visible(item, layer.visible);
 	return true;
@@ -691,6 +879,41 @@ std::vector<std::string> generated_image_files()
 	return g_kept_files ? *g_kept_files : std::vector<std::string>();
 }
 
+// Re-applies the document position to every PSD text source in `scene`
+// (recursing into groups). Called after all sources report a real size, because
+// OBS re-lays out an item while its source still reports a zero size and that
+// overwrote the position place_item() had just set.
+struct RepositionCtx {
+	float fit = 1.0f;
+};
+
+static bool reposition_item_cb(obs_scene_t *, obs_sceneitem_t *item, void *param)
+{
+	auto *ctx = static_cast<RepositionCtx *>(param);
+	if (obs_sceneitem_is_group(item)) {
+		obs_scene_t *inner = obs_sceneitem_group_get_scene(item);
+		if (inner != nullptr)
+			obs_scene_enum_items(inner, reposition_item_cb, param);
+		return true;
+	}
+	obs_source_t *src = obs_sceneitem_get_source(item);
+	if (src == nullptr)
+		return true;
+	// Full-canvas layers (images and text alike) all belong at the origin.
+	struct vec2 pos, scale;
+	vec2_set(&pos, 0.0f, 0.0f);
+	vec2_set(&scale, ctx->fit, ctx->fit);
+	obs_sceneitem_set_pos(item, &pos);
+	obs_sceneitem_set_scale(item, &scale);
+	return true;
+}
+
+static void reposition_text_items(obs_scene_t *scene, double fit)
+{
+	RepositionCtx ctx{(float)fit};
+	obs_scene_enum_items(scene, reposition_item_cb, &ctx);
+}
+
 bool build_scene_from_psd(const psd::Document &doc, const char *scene_name, std::string &err, obs_source_t **scene_out,
 			  const SceneBuildOptions &options)
 {
@@ -725,6 +948,8 @@ bool build_scene_from_psd(const psd::Document &doc, const char *scene_name, std:
 	st.text_stroke_width = options.text_stroke_width;
 	st.text_force_obs_source = options.text_force_obs_source;
 	const Placement p = compute_placement(doc, options.placement);
+	st.canvas_w = p.canvas_w > 0 ? p.canvas_w : doc.width;
+	st.canvas_h = p.canvas_h > 0 ? p.canvas_h : doc.height;
 
 	// Public scene (NOT private): obs_scene_create() inserts the scene source into
 	// libobs' public source list, which is what obs_frontend_get_scenes() walks.
@@ -771,6 +996,16 @@ bool build_scene_from_psd(const psd::Document &doc, const char *scene_name, std:
 			obs_scene_release(scene);
 			return false;
 		}
+
+		// OBS re-lays out a scene item while the source is still reporting a zero
+		// size, which overwrote the position place_item() had just set on some
+		// text items. Now that every source knows its size, set them again.
+		reposition_text_items(scene, p.fit);
+		// Report the state OBS ended up with: a text layer that is missing from
+		// the canvas is either a zero-sized source or an item that sits outside it.
+		for (auto &kv : st.text_offsets)
+			blog(LOG_INFO, "[obs-psd] text source %p offset=(%d,%d)", (void *)kv.first,
+			     kv.second[0], kv.second[1]);
 	}
 
 	g_missing_fonts = st.missing_fonts;

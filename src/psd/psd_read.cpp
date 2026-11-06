@@ -19,6 +19,7 @@
 
 #include "impl/psd_common.h"
 #include "psd_descriptor.h"
+#include "psd_file.h"
 #include "psd_text.h"
 
 #include "miniz.h"
@@ -1271,7 +1272,7 @@ bool read_file(const std::string &path, Document &out, std::string &error, const
 {
     error.clear();
     out = Document{};
-    FILE *f = std::fopen(path.c_str(), "rb");
+    FILE *f = detail::fopen_utf8(path, "rb");
     if (f == nullptr) {
         error = "cannot open file: " + path;
         return false;

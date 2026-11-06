@@ -39,7 +39,18 @@ static std::vector<uint8_t> read_file_bytes(const char *path)
 
 int main(int argc, char **argv)
 {
-    const char *seed_path = argc > 1 ? argv[1] : "/tmp/psd_rt.psd";
+    const char *tmp_base = std::getenv("PSD_TEST_TMPDIR");
+#ifdef _WIN32
+    if (!tmp_base || !*tmp_base)
+        tmp_base = std::getenv("TEMP");
+#else
+    if (!tmp_base || !*tmp_base)
+        tmp_base = "/tmp";
+#endif
+    if (!tmp_base || !*tmp_base)
+        tmp_base = ".";
+    const std::string default_seed = std::string(tmp_base) + "/psd_rt.psd";
+    const char *seed_path = argc > 1 ? argv[1] : default_seed.c_str();
     const int iterations = argc > 2 ? std::atoi(argv[2]) : 20000;
     const std::vector<uint8_t> seed = read_file_bytes(seed_path);
     if (seed.empty()) {

@@ -63,6 +63,9 @@ struct MissingFont {
 	std::string layer;
 	std::string wanted;  // PostScript name from the PSD
 	std::string used;    // font actually rendered with
+	// Installed fonts that look closest to `wanted` (family names), so the
+	// dialog can suggest something concrete to switch to.
+	std::vector<std::string> suggestions;
 };
 
 bool build_scene_from_psd(const psd::Document &doc, const char *scene_name, std::string &err,

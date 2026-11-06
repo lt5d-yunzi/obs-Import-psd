@@ -11,8 +11,14 @@
 #include "obs/obs_include.h"
 
 #include "obs/psd_ignore.h"
+#include "obs/psd_text_source.h"
 #include "psd/psd.h"
 #include "ui/psd_ui.h"
+
+#ifdef OBS_PSD_SELFTEST
+#include "obs/selftest.h"
+#include <QTimer>
+#endif
 
 #include <string>
 
@@ -36,6 +42,15 @@ void on_frontend_event(enum obs_frontend_event event, void *)
     if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
         obs_frontend_add_tools_menu_item(obs_module_text("tools_menu.import"), on_import_psd, nullptr);
         obs_frontend_add_tools_menu_item(obs_module_text("tools_menu.export"), on_export_psd, nullptr);
+        blog(LOG_INFO, "[obs-psd] Tools menu: '%s', '%s'", obs_module_text("tools_menu.import"),
+             obs_module_text("tools_menu.export"));
+#ifdef OBS_PSD_SELFTEST
+        if (obspsd::selftest_requested()) {
+            // Let OBS finish its start-up (video thread, frontend event loop)
+            // before touching graphics from the UI thread.
+            QTimer::singleShot(3000, []() { obspsd::run_selftest(); });
+        }
+#endif
     }
 }
 
@@ -44,6 +59,7 @@ void on_frontend_event(enum obs_frontend_event event, void *)
 bool obs_module_load(void)
 {
     blog(LOG_INFO, "[obs-psd] loaded (PSD import/export)");
+    obspsd::register_psd_text_source();
     obs_frontend_add_event_callback(on_frontend_event, nullptr);
     return true;
 }

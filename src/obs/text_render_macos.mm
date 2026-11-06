@@ -6,6 +6,7 @@
 #include "obs/text_render.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 
@@ -113,25 +114,189 @@ std::string font_family(const std::string &font)
 	return out;
 }
 
+bool font_face_and_style(const std::string &font, std::string &face, std::string &style);
+
 std::string font_style(const std::string &font)
 {
-	if (font.empty())
-		return "Regular";
-	// Derive from the PostScript name: faces report trailing tokens such as
-	// "-Bold", "-Regular", "Bold", "Italic". Fall back to Regular.
-	std::string tail = font;
-	const size_t dash = tail.rfind('-');
-	if (dash != std::string::npos)
-		tail = tail.substr(dash + 1);
-	if (tail.find("Bold") != std::string::npos)
-		return "Bold";
-	if (tail.find("Italic") != std::string::npos)
-		return "Italic";
-	if (tail.find("Light") != std::string::npos)
-		return "Light";
-	if (tail.find("Medium") != std::string::npos)
-		return "Medium";
+	// Ask the font manager instead of guessing from the name: a family called
+	// "ShanghaiFace-Zen-BoldGB2.0" exposes its single face with the style
+	// "Regular", so looking for "Bold" in the PostScript name is wrong and left
+	// OBS' text source unable to resolve the face.
+	std::string face, style;
+	if (font_face_and_style(font, face, style))
+		return style;
 	return "Regular";
+}
+
+bool font_face_and_style(const std::string &font, std::string &face, std::string &style)
+{
+	face.clear();
+	style.clear();
+	if (font.empty())
+		return false;
+	// Build the font exactly as font_is_usable() does, then ask CoreText for the
+	// two names OBS needs: the PostScript name of the resolved face and the
+	// style variant.
+	CFStringRef name = cf_string(font);
+	if (name == nullptr)
+		return false;
+	CTFontRef f = CTFontCreateWithName(name, 12.0, nullptr);
+	CFRelease(name);
+	if (f == nullptr)
+		return false;
+
+	CFStringRef ps = CTFontCopyPostScriptName(f);
+	if (ps != nullptr) {
+		char buf[256] = {};
+		if (CFStringGetCString(ps, buf, sizeof buf, kCFStringEncodingUTF8))
+			face = buf;
+		CFRelease(ps);
+	}
+
+	// The style is the suffix after the family name; when the PostScript name
+	// has no suffix the face is the regular variant.
+	CFStringRef fam = CTFontCopyFamilyName(f);
+	if (fam != nullptr) {
+		char fbuf[256] = {};
+		if (CFStringGetCString(fam, fbuf, sizeof fbuf, kCFStringEncodingUTF8)) {
+			const std::string family(fbuf);
+			if (face == family)
+				style = "Regular";
+			else if (face.rfind(family + "-", 0) == 0)
+				style = face.substr(family.size() + 1);
+			else if (face.rfind(family, 0) == 0)
+				style = face.substr(family.size());
+		}
+		CFRelease(fam);
+	}
+	if (style.empty())
+		style = "Regular";
+	CFRelease(f);
+	return !face.empty();
+}
+
+std::vector<std::string> installed_font_families()
+{
+	std::vector<std::string> out;
+	CFArrayRef families = CTFontManagerCopyAvailableFontFamilyNames();
+	if (families == nullptr)
+		return out;
+	const CFIndex count = CFArrayGetCount(families);
+	const UniChar probe[] = {0x540D, 0x4EBA}; // 名人
+	for (CFIndex i = 0; i < count; ++i) {
+		CFStringRef ref = static_cast<CFStringRef>(CFArrayGetValueAtIndex(families, i));
+		char buf[256] = {};
+		if (!CFStringGetCString(ref, buf, sizeof buf, kCFStringEncodingUTF8))
+			continue;
+		// Only families that actually carry CJK glyphs are useful here.
+		CTFontRef probe_font = CTFontCreateWithName(ref, 12.0, nullptr);
+		bool cjk = false;
+		if (probe_font != nullptr) {
+			CGGlyph glyphs[2] = {};
+			cjk = CTFontGetGlyphsForCharacters(probe_font, probe, glyphs, 2) && glyphs[0] != 0 &&
+			      glyphs[1] != 0;
+			CFRelease(probe_font);
+		}
+		if (cjk)
+			out.emplace_back(buf);
+	}
+	CFRelease(families);
+	std::sort(out.begin(), out.end());
+	out.erase(std::unique(out.begin(), out.end()), out.end());
+	return out;
+}
+
+std::vector<std::string> similar_font_families(const std::string &missing, int limit)
+{
+	std::vector<std::string> out;
+	if (missing.empty() || limit <= 0)
+		return out;
+
+	// Score every installed family by name affinity and CJK coverage. A PSD
+	// usually names a custom "Zen"/"Black"/"Hei" style Chinese face, so families
+	// sharing a token and covering the CJK block rank first.
+	const std::string want = [&] {
+		std::string w = missing;
+		for (char &c : w)
+			c = char(std::tolower(static_cast<unsigned char>(c)));
+		return w;
+	}();
+	// Tokens that say little about the design.
+	static const char *kNoise[] = {"bold", "light", "medium", "regular", "semibold", "zh", "cn",
+				       "sc",  "gb",    "regular", "thin",     "black",    "book"};
+	auto is_noise = [](const std::string &t) {
+		for (const char *n : kNoise)
+			if (t == n)
+				return true;
+		return false;
+	};
+
+	CFArrayRef families = CTFontManagerCopyAvailableFontFamilyNames();
+	if (families == nullptr)
+		return out;
+	const CFIndex count = CFArrayGetCount(families);
+
+	struct Scored {
+		int score;
+		std::string name;
+	};
+	std::vector<Scored> scored;
+	const UniChar probe[] = {0x540D, 0x4EBA}; // 名人
+
+	for (CFIndex i = 0; i < count; ++i) {
+		char buf[256] = {};
+		CFStringRef ref = static_cast<CFStringRef>(CFArrayGetValueAtIndex(families, i));
+		if (!CFStringGetCString(ref, buf, sizeof buf, kCFStringEncodingUTF8))
+			continue;
+		std::string family(buf);
+		std::string lowered = family;
+		for (char &c : lowered)
+			c = char(std::tolower(static_cast<unsigned char>(c)));
+
+		int score = 0;
+		// Token overlap.
+		size_t pos = 0;
+		while (pos <= lowered.size()) {
+			const size_t dot = lowered.find_first_of(" -._", pos);
+			const std::string token = lowered.substr(pos, dot == std::string::npos ? std::string::npos
+										  : dot - pos);
+			if (!token.empty() && !is_noise(token) && want.find(token) != std::string::npos)
+				score += 3;
+			if (dot == std::string::npos)
+				break;
+			pos = dot + 1;
+		}
+		// Prefix affinity ("heiti" vs "STHeiti").
+		if (lowered.size() >= 4 && want.rfind(lowered.substr(0, 4), 0) != std::string::npos)
+			score += 2;
+		// CJK coverage beats a pretty name.
+		bool covers_cjk = false;
+		CTFontRef probe_font = CTFontCreateWithName(ref, 12.0, nullptr);
+		if (probe_font != nullptr) {
+			CGGlyph glyphs[2] = {};
+			covers_cjk = CTFontGetGlyphsForCharacters(probe_font, probe, glyphs, 2) &&
+				     glyphs[0] != 0 && glyphs[1] != 0;
+			CFRelease(probe_font);
+		}
+		if (covers_cjk)
+			score += 2;
+		// A substitute for Chinese text must actually contain CJK glyphs; without
+		// this the ranking happily suggests Wingdings for a missing Chinese face.
+		if (!covers_cjk)
+			continue;
+		if (score > 0)
+			scored.push_back({score, family});
+	}
+	CFRelease(families);
+
+	std::stable_sort(scored.begin(), scored.end(),
+			 [](const Scored &a, const Scored &b) { return a.score > b.score; });
+	for (const Scored &s : scored) {
+		if (int(out.size()) >= limit)
+			break;
+		out.push_back(s.name);
+	}
+	return out;
 }
 
 bool render_text_layer(const TextRenderRequest &req, TextRenderResult &out)

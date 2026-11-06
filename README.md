@@ -3,10 +3,33 @@
 **OBS Studio 的 PSD 导入 / 导出插件** · PSD import/export plugin for OBS Studio
 
 [![macOS](https://img.shields.io/badge/platform-macOS%20arm64-lightgrey)]()
+[![Windows](https://img.shields.io/badge/platform-Windows%20x64-lightgrey)]()
 [![OBS](https://img.shields.io/badge/OBS-32.x-blue)]()
 [![License](https://img.shields.io/badge/license-GPL--2.0--or--later-green)]()
 
 **[English](#english) · [中文](#中文) · [未修复的 Bug](#未修复的-bug截至最后一次提交)**
+
+---
+
+## 平台 / 分支 / 构建方式
+
+| 平台 | 分支 | 构建入口 | 说明 |
+|---|---|---|---|
+| macOS arm64 | `main` | `./build.sh` | 原生开发线，CoreText 文本渲染 |
+| Windows x64 | `windows` | `build-win.ps1` | CMake + MSVC，Qt 文本渲染，链接已安装的 OBS DLL |
+
+> **文本图层**：勾选「始终使用 OBS 文本源」后会创建自建源类型 `obs_psd_text_source`
+> （不要在 OBS 里手选，它不是给用户直接添加的）。它用 CoreText / Qt 光栅化，
+> 属性面板可改文字、字体（下拉框）、字号、填充色、描边开关/宽度/颜色。
+> 不勾选则渲染成位图，外观最精确但不可编辑。
+
+两条线共享 `src/psd/`、`src/obs/`、`src/ui/` 与 `tests/`；`windows` 分支在此基础上增加
+CMake 工程、Qt 文本渲染器、UTF-8 路径支持以及 Windows 端验证记录。
+
+**选择编译哪一端，取决于你运行哪个脚本**：macOS 用 `./build.sh`，Windows 用
+`build-win.ps1`。CMake 内部按 `WIN32` 自动选择文本渲染实现（Windows → Qt，其它 →
+CoreText），不需要手动切换宏；`-DOBS_PSD_SELFTEST=ON` 可额外编译开发者自测钩子
+（发布构建默认关闭）。
 
 ---
 
@@ -125,6 +148,93 @@ together with **@lt5d-yunzi**.
 * OBS 32（默认 `/Applications/OBS.app`，可用 `OBS_APP=... ./build.sh` 覆盖）。
 * 不依赖 OBS 源码树：libobs / frontend-api 头文件与 `simde`、Qt 头文件已 vendored 在 `third_party/`。
 
+### Windows x64（新增）
+
+Windows 端用 CMake + MSVC 构建，直接链接已安装的 OBS 32.2.2 的 DLL，不需要编译整个 OBS。
+
+前置：
+
+* Visual Studio 2022（或更新的 Build Tools）+ C++ 桌面工作负载
+* CMake ≥ 3.21
+* `third_party/obs-src`：OBS 32.2.2 源码（只用公共头文件）
+* `third_party/qt6`：与 OBS 配套的 Qt 6 SDK（`obs-deps` 的 `windows-deps-qt6-*-x64` 包）
+
+```powershell
+# 1) OBS 头文件（只取 tag，浅克隆即可）
+git clone --depth 1 --branch 32.2.2 https://github.com/obsproject/obs-studio third_party/obs-src
+
+# 2) Qt 6（OBS 32.2.2 对应 obs-deps 2026-07-15；解压后 third_party/qt6 下应有 include/ lib/ bin/）
+#    https://github.com/obsproject/obs-deps/releases/download/2026-07-15/windows-deps-qt6-2026-07-15-x64.zip
+
+# 3) 一键构建（缺导入库时会自动生成）
+powershell -ExecutionPolicy Bypass -File build-win.ps1 -ObsDir 'D:\64\obs-studio'
+
+# 4) 构建并直接装进便携版 OBS
+powershell -ExecutionPolicy Bypass -File build-win.ps1 -ObsDir 'D:\64\obs-studio' -Install
+
+# 可选：带自测钩子的开发者构建
+powershell -ExecutionPolicy Bypass -File build-win.ps1 -Install -SelfTest
+```
+
+`build-win.ps1` 支持 `-QtRoot`、`-ObsHeaders`、`-Configuration`，缺依赖时会打印需要补齐的
+目录与下载地址。也可以手动走 CMake：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File cmake/make-import-libs.ps1 -ObsBin 'D:\64\obs-studio\bin\64bit'
+cmake -S . -B build-win -G "Visual Studio 17 2022" -A x64 -DOBS_DIR=D:/64/obs-studio
+cmake --build build-win --config Release
+```
+
+构建选项 `-DOBS_PSD_SELFTEST=ON` 会编译一个开发者自测钩子（见下），发布构建保持默认 OFF。
+
+#### Windows 自测（无对话框）
+
+```powershell
+$env:OBS_PSD_SELFTEST        = 'C:\path\to\sample.psd'
+$env:OBS_PSD_SELFTEST_OUT    = 'C:\path\to\roundtrip.psd'
+$env:OBS_PSD_SELFTEST_REPORT = 'C:\path\to\report.txt'
+# 可选：模拟勾选“始终使用 OBS 文本源”
+$env:OBS_PSD_SELFTEST_FORCE_TEXT = '1'
+D:\64\obs-studio\bin\64bit\obs64.exe
+```
+
+启动后 3 秒，插件会读取该 PSD、建场景、保存场景集合、再导出一份 PSD，并把结果写进 report。
+用 `tests/verify_psd.py` 可独立校验导出的文件。
+
+Windows 端已验证（便携版 OBS 32.2.2，Windows 11）：
+
+* `杂谈PSD022.psd`：23 图层（3 个文本层、6 个分组）→ 场景 8 个顶层项 / 15 个图片源；
+  缺失字体 `ShanghaiFace-Zen-BoldGB2.0` 自动回退到 `Microsoft YaHei UI` 并记录；
+  导出 15 层 → `verify_psd.py` 校验通过；重启后场景与图层仍在。
+* `红蓝测试图.psd`：2 图层往返正常。
+* 真实 UI 路径（不是自测钩子）：工具菜单 → “导入 PSD 为场景…” → 文件对话框选
+  `杂谈PSD022.psd` → 导入对话框确定 → 日志 `built scene '杂谈PSD022' from 23 PSD layer(s)`，
+  场景与图层 PNG 都正确落盘并随场景集合保存。
+* PSD 编解码测试在 MSVC 下同样通过：`ROUND TRIP OK (154 checks)`、
+  `verify_psd.py` 独立校验、3000 次 fuzz 冒烟（0 crash / 0 hang）。
+  （测试的临时文件路径已改为 `%TEMP%`，不再硬编码 `/tmp`。）
+
+#### Windows 端顺带修掉的问题
+
+* **导出把每个可见源都判成 “null source”**（`scene_export.cpp` 多传了一次
+  `ignore_reason(nullptr, ...)`）：可见源全部被跳过，导出永远是空 PSD。已删除。
+* **反预乘表的除零崩溃**（`source_render.cpp`）：`recip[0]` 的计算除以 0，在 Windows
+  上抛出结构化异常并杀死图形线程里的渲染任务，调用方等 10 秒超时——表现为导出卡死。
+  现在 0 单独处理。
+* **中文路径打不开/导出失败**（`psd_read/write`）：代码全程用 UTF-8 路径，而 Windows 的
+  `fopen()` 按 ANSI 代码页解释路径，选一个中文名的 PSD 就报 “cannot open file”。
+  现在经 `psd::detail::fopen_utf8()`（UTF-8 → UTF-16 + `_wfopen`）打开；图层 PNG 的写出
+  也改用 `stbi_write_png_to_func()` 走同一条路径。
+* **导出对话框**：默认目录原来直接用 `$HOME`（Windows 上没有），改为“文档”目录；
+  补 `.psd` 后缀的判断写反（`||` 两个 `!=`），会把 `x.psd` 存成 `x.psd.psd`，已修。
+* **本地化文本被截断**：OBS 的 locale 解析器按空白切分，含空格的值必须加引号，
+  否则菜单只显示“导入/导出场景为”。两个 ini 已加引号。
+* **便携版路径**：便携模式下列图 PNG 现在写到 `<OBS>\config\obs-studio\obs-psd\`，
+  不再写 `%APPDATA%`，整个便携目录可以搬走。
+* **缺字体时的回退**：默认改为用系统 CJK 字体栅格化（原先无条件创建
+  `text_ft2_source_v2`，在 macOS/Windows 上都会 0×0 显示空白）；勾选
+  “始终使用 OBS 文本源” 时，字体存在才建文本源，字体缺失同样回退到位图。
+
 ## 目录
 
 ```
@@ -191,8 +301,8 @@ GPL 的传染性决定了：链接它的插件必须同样以 GPL 发布。这�
 
 ### AI 生成声明（重要）
 
-本项目绝大部分代码由 AI 编码代理生成（DeepSeek Harness），
-由人类作者 [@lt5d-yunzi](https://github.com/lt5d-yunzi) 提出需求、验证结果并决定设计方向。
+**本项目的绝大部分代码由 AI 编码代理生成**（DeepSeek Harness），由人类作者
+[@lt5d-yunzi](https://github.com/lt5d-yunzi) 提出需求、验证结果并决定设计方向。
 
 由此产生以下事实，请在使用前知晓：
 
@@ -234,8 +344,8 @@ GNU General Public License for more details.
 
 ## English
 
-**obs-Import-psd** is a macOS plugin for OBS Studio 32 that imports Photoshop documents
-as layered scenes and exports scenes back to PSD.
+**obs-Import-psd** is an OBS Studio 32 plugin for macOS arm64 and Windows x64 that imports
+Photoshop documents as layered scenes and exports scenes back to PSD.
 
 ### Features
 
@@ -305,8 +415,9 @@ and the scene survives an OBS restart.
 
 See the Chinese section below for the full list — in short:
 
-1. `text_ft2_source_v2` renders as `0x0` (six different configurations tried; the
-   rasteriser path is the working one).
+1. `text_ft2_source_v2` renders as `0x0` when it is used (six different configurations
+   tried; the rasteriser path is the working one). The default path no longer creates a
+   text source when the font is missing: it rasterises with a substitute system font.
 2. A type layer's fill colour and stroke cannot be read back from the PSD automatically
    (they live in EngineData / the lfx2 descriptor); the import dialog asks for them.
 3. The text size uses empirical factors (0.7 for the em ratio, 0.1 for tracking).
@@ -365,10 +476,21 @@ Consequences you should know before reuse:
 
 以下是**确认存在、尚未修好**的问题。按影响排序。
 
-## 1. `text_ft2_source_v2` 导入后渲染为 0×0（未修复）
+## 0. 本轮已解决的历史问题（留档）
 
-**现象**：勾选「始终使用 OBS 文本源」后，文字图层能创建出 `text_ft2_source_v2` 源，
-但源尺寸恒为 `0x0`，画面上是空的。
+| 问题 | 根因 | 修法 |
+|---|---|---|
+| 文本源渲染为 `0x0` | OBS 内置 `text_ft2_source_v2` 不认 CoreText 报出的字体名，且 `font` 是嵌套对象而非字符串 | 自建 `obs_psd_text_source`（异步视频源），CoreText 光栅化后交给 OBS |
+| 文本位置错误 | 文本位图只是文字尺寸，却按全画布项摆放；`pad` 依赖时序 | 文本源也渲染**整幅画布**，与图片层走完全相同的摆放逻辑 |
+| 重启后文本不显示 | 异步源只在激活时才渲染收到的帧，而场景在渲染器就绪前就被激活 | `load()` 回调 + 唤醒期每帧重推（缓存帧，只重发不重算） |
+| 选红色显示蓝色 | `unpack_color()` 从 `(v>>16)` 读 R，但 OBS 是 `0xAABBGGRR`（R 在最低字节） | R 从 `v & 0xFF` 读，G `>>8`，B `>>16` |
+| 属性面板没字体 | `obs_properties_add_font` 的嵌套对象经过 `obs_source_create` 后总是空的 | 改成字符串下拉框，绑定 `font_name`，列出本机 74 个中文字体 |
+| 缺字体无提示 | 位图路径记录 `MissingFont` 时没填 `suggestions` | 补齐建议列表，对话框列出本机相近字体 |
+
+## 1. ~~`text_ft2_source_v2` 导入后渲染为 0×0~~（已用自建文本源绕过）
+
+**保留本节作为记录**：OBS 自带的文本源在本机对 CoreText 报出的字体名始终渲染 `0x0`，
+试过 6 种配置组合均无效（详见下方尝试表）。现在不再使用它。
 
 **已尝试且失败**（日志确认每一步都生效）：
 

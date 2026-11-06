@@ -420,11 +420,12 @@ bool parse_engine_data(const uint8_t *data, size_t size, TextStyle &out)
 						w.skip_space();
 						if (w.accept("<<")) {
 							if (read_color_values(w, v)) {
-								for (int i = 0; i < 4; ++i)
-									out.color[0] = v[1];
-									out.color[1] = v[2];
-									out.color[2] = v[3];
-									out.color[3] = v[0] <= 0.0 ? 1.0 : v[0];
+								// Photoshop stores text fill colour as
+								// [alpha, R, G, B].
+								out.color[0] = v[1];
+								out.color[1] = v[2];
+								out.color[2] = v[3];
+								out.color[3] = v[0] <= 0.0 ? 1.0 : v[0];
 								color_ok = true;
 							}
 							break;

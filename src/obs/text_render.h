@@ -51,7 +51,22 @@ bool font_is_usable(const std::string &font);
 // OBS' text sources select the typeface by family name. Empty when unknown.
 std::string font_family(const std::string &font);
 
+// Every installed font family that can render CJK text, sorted. Used to fill the
+// font dropdown of the PSD text source.
+std::vector<std::string> installed_font_families();
+
+// Installed font FAMILIES that could stand in for a missing PostScript name,
+// best match first. Used to tell the user what to pick instead of the font the
+// PSD asks for. At most `limit` entries.
+std::vector<std::string> similar_font_families(const std::string &missing, int limit = 5);
+
 // Style name for a PostScript name ("Bold", "Regular", ...). Empty when unknown.
 std::string font_style(const std::string &font);
+
+// OBS' text sources select a typeface by the font MANAGER's face name (what
+// Cocoa calls [NSFont fontName] / the PostScript name, e.g.
+// "ShanghaiFace-Zen-BoldGB2.0-Regular") plus the manager's style name
+// ("Regular"), NOT the family name. Fills both; returns false when unknown.
+bool font_face_and_style(const std::string &font, std::string &face, std::string &style);
 
 } // namespace psd
