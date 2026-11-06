@@ -119,8 +119,15 @@ jobs:
       - name: Build
         shell: pwsh
         run: |
-          $obs = (Get-ChildItem obs -Directory | Select-Object -First 1).FullName
-          ./build-win.ps1 -ObsDir $obs -QtRoot "$PWD/third_party/qt6"
+          # The portable zip can nest one or two levels; locate the directory that
+          # actually holds bin\64bit\obs.dll.
+          $dll = Get-ChildItem obs -Recurse -Filter obs.dll -ErrorAction SilentlyContinue |
+                 Where-Object { $_.FullName -match 'bin[\\/]64bit' } |
+                 Select-Object -First 1
+          if (-not $dll) { throw "obs.dll not found under obs/ - archive layout unknown" }
+          $obsRoot = $dll.Directory.Parent.Parent.FullName   # ...\<root>\bin\64bit -> <root>
+          Write-Output "OBS root: $obsRoot"
+          ./build-win.ps1 -ObsDir $obsRoot -QtRoot "$PWD/third_party/qt6"
 
       - name: Package
         shell: pwsh
