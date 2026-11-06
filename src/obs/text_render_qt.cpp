@@ -242,6 +242,118 @@ std::string font_style(const std::string &font)
 	return "Regular";
 }
 
+std::vector<std::string> installed_font_families()
+{
+	std::vector<std::string> out;
+	if (QGuiApplication::instance() == nullptr)
+		return out;
+	const QStringList families = QFontDatabase::families();
+	for (const QString &f : families) {
+		QFont font(f);
+		font.setPixelSize(12);
+		QFontMetricsF metrics(font);
+		// Only families that actually carry CJK glyphs are useful here.
+		if (metrics.inFont(QChar(0x540D)) && metrics.inFont(QChar(0x4EBA))) // 名人
+			out.push_back(f.toStdString());
+	}
+	std::sort(out.begin(), out.end());
+	out.erase(std::unique(out.begin(), out.end()), out.end());
+	return out;
+}
+
+std::vector<std::string> similar_font_families(const std::string &missing, int limit)
+{
+	std::vector<std::string> out;
+	if (missing.empty() || limit <= 0 || QGuiApplication::instance() == nullptr)
+		return out;
+
+	std::string want = missing;
+	for (char &c : want) {
+		if (c >= 'A' && c <= 'Z')
+			c = char(c - 'A' + 'a');
+	}
+
+	// Tokens that say little about the design.
+	static const char *const kNoise[] = {"bold", "light", "medium", "regular", "semibold", "zh",
+					     "cn",   "sc",    "gb",     "thin",    "black",    "book"};
+	auto is_noise = [](const std::string &token) {
+		for (const char *noise : kNoise) {
+			if (token == noise)
+				return true;
+		}
+		return false;
+	};
+
+	struct Scored {
+		int score;
+		std::string name;
+	};
+	std::vector<Scored> scored;
+
+	const QStringList families = QFontDatabase::families();
+	for (const QString &family_ref : families) {
+		const std::string family = family_ref.toStdString();
+		std::string lowered = family;
+		for (char &c : lowered) {
+			if (c >= 'A' && c <= 'Z')
+				c = char(c - 'A' + 'a');
+		}
+
+		int score = 0;
+		// Token overlap.
+		size_t pos = 0;
+		while (pos <= lowered.size()) {
+			const size_t sep = lowered.find_first_of(" -._", pos);
+			const std::string token =
+				lowered.substr(pos, sep == std::string::npos ? std::string::npos : sep - pos);
+			if (!token.empty() && !is_noise(token) && want.find(token) != std::string::npos)
+				score += 3;
+			if (sep == std::string::npos)
+				break;
+			pos = sep + 1;
+		}
+		// Prefix affinity ("heiti" vs "STHeiti").
+		if (lowered.size() >= 4 && want.rfind(lowered.substr(0, 4), 0) != std::string::npos)
+			score += 2;
+
+		// A substitute for Chinese text must actually contain CJK glyphs.
+		QFont probe(family_ref);
+		probe.setPixelSize(12);
+		QFontMetricsF metrics(probe);
+		const bool covers_cjk = metrics.inFont(QChar(0x540D)) && metrics.inFont(QChar(0x4EBA));
+		if (!covers_cjk)
+			continue;
+		score += 2;
+		if (score > 0)
+			scored.push_back({score, family});
+	}
+
+	std::stable_sort(scored.begin(), scored.end(),
+			 [](const Scored &a, const Scored &b) { return a.score > b.score; });
+	for (const Scored &s : scored) {
+		if (int(out.size()) >= limit)
+			break;
+		out.push_back(s.name);
+	}
+	return out;
+}
+
+bool font_face_and_style(const std::string &font, std::string &face, std::string &style)
+{
+	face.clear();
+	style.clear();
+	if (font.empty() || QGuiApplication::instance() == nullptr)
+		return false;
+	// On Windows OBS' text sources take the family name as the face; keep the
+	// style suffix separate for the nested "font" object.
+	const std::string family = resolve_family(font);
+	if (family.empty())
+		return false;
+	face = family;
+	style = font_style(font);
+	return true;
+}
+
 bool render_text_layer(const TextRenderRequest &req, TextRenderResult &out)
 {
 	out = TextRenderResult();

@@ -63,6 +63,7 @@ set(SOURCES
   src/obs/scene_build.cpp
   src/obs/scene_export.cpp
   src/obs/psd_ignore.cpp
+  src/obs/psd_text_source.cpp
 )
 
 if(WIN32)
