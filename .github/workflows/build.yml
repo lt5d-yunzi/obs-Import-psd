@@ -86,10 +86,19 @@ jobs:
           $deps = '2026-07-15'
           Invoke-WebRequest "https://github.com/obsproject/obs-deps/releases/download/$deps/windows-deps-qt6-$deps-x64.zip" -OutFile qt6.zip
           Expand-Archive qt6.zip -DestinationPath "$tp/qt6-extract" -Force
-          # The archive unpacks to a single top-level dir; flatten it.
-          $inner = Get-ChildItem "$tp/qt6-extract" -Directory | Select-Object -First 1
-          Move-Item $inner.FullName "$tp/qt6"
-          Remove-Item "$tp/qt6-extract" -Recurse -Force
+          # The archive unpacks to include/ lib/ bin/ directly, but tolerate a
+          # single wrapper directory too.
+          $direct = Join-Path "$tp/qt6-extract" "include"
+          if (Test-Path $direct) {
+            Move-Item "$tp/qt6-extract" "$tp/qt6"
+          } else {
+            $inner = Get-ChildItem "$tp/qt6-extract" -Directory | Select-Object -First 1
+            if (-not $inner) { throw "Qt archive has no directory" }
+            Move-Item $inner.FullName "$tp/qt6"
+            Remove-Item "$tp/qt6-extract" -Recurse -Force
+          }
+          if (-not (Test-Path "$tp/qt6/include")) { throw "Qt include/ missing after extract" }
+          Write-Output "Qt ready at $tp/qt6"
 
           Write-Output "== miniz + stb =="
           git clone --depth 1 https://github.com/richgel999/miniz "$tp/miniz-src"
